@@ -18,3 +18,10 @@ __pycache__/
 
 # Build output
 dist/
+
+<!-- kit:anchor -->
+.ai/
+.cursor/rules/sidecar-*.mdc
+.claude/settings.local.json
+.claude/skills
+<!-- /kit:anchor -->
