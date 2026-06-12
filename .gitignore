@@ -1,0 +1,20 @@
+# Internal working material - never tracked. The tracked tree IS the
+# shippable product; everything an end user shouldn't see lives below.
+.plans/
+.claude/
+CLAUDE.md
+AGENTS.md
+Knowledge/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Build output
+dist/
