@@ -909,7 +909,7 @@ class PluginPill(QtWidgets.QWidget):
             action.triggered.connect(
                 lambda *_: self.open_folder_requested.emit()
             )
-            menu.exec(event.globalPos())
+            compat.run_modal(menu, event.globalPos())
         except Exception as exc:
             log.warning(f"pill context menu failed: {exc!r}")
 

@@ -124,7 +124,10 @@ def read_dispatcher(path: str) -> DispatcherState:
     no side effects (no implicit write).
     """
     try:
-        with open(path, "r") as fh:
+        # Pinned to UTF-8 to match the write side (atomic_io.write_atomic)
+        # rather than the host locale - LANG=C sessions must read the
+        # dispatcher identically to UTF-8 desktops.
+        with open(path, "r", encoding="utf-8") as fh:
             source = fh.read()
     except FileNotFoundError:
         return DispatcherState()

@@ -164,9 +164,9 @@ def _default_confirm_remove_folder(parent: "QtWidgets.QWidget", path: str) -> bo
         yes_btn.setText("Remove")
     box.setDefaultButton(QtWidgets.QMessageBox.Cancel)
 
-    # Qt5 vs Qt6 method-name parity: both expose .exec(), Qt5 also exposes
-    # .exec_(); we use .exec() which is present on both PySide2 and PySide6.
-    result = box.exec()
+    # PySide2 (Nuke 13-15) ships only .exec_(); PySide6 ships .exec().
+    # compat.run_modal absorbs the difference.
+    result = compat.run_modal(box)
     return result == QtWidgets.QMessageBox.Yes
 
 
@@ -255,7 +255,7 @@ class FolderRow(QtWidgets.QFrame):
             # (no signal round-trip like Open Folder needs).
             copy_action = menu.addAction("Copy Path")
             copy_action.triggered.connect(lambda *_: self._copy_path_to_clipboard())
-            menu.exec(event.globalPos())
+            compat.run_modal(menu, event.globalPos())
         except Exception:  # pragma: no cover - defensive: never crash the panel
             pass
 

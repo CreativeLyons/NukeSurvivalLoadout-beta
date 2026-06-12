@@ -137,12 +137,10 @@ def confirm_quit_with_unsaved_changes(
 def _exec_message_box(box: QtWidgets.QMessageBox) -> int:
     """Call ``exec`` on a ``QMessageBox`` across PySide2 and PySide6.
 
-    PySide6 deprecated ``exec_`` in favour of ``exec``; PySide2 ships only
-    ``exec_``. The shim picks whichever is defined.
+    Delegates to :func:`compat.run_modal`, the panel-wide shim (PySide2
+    ships only ``exec_``; PySide6 ships ``exec``).
     """
-    if hasattr(box, "exec"):
-        return int(box.exec())
-    return int(box.exec_())  # pragma: no cover -- PySide2 path
+    return int(compat.run_modal(box))
 
 
 # ---------------------------------------------------------------------------

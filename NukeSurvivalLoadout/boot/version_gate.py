@@ -16,7 +16,6 @@ continues to start normally without NSL.
 
 from __future__ import annotations
 
-import sys
 from typing import Optional
 
 from NukeSurvivalLoadout import log
@@ -42,8 +41,9 @@ def _emit_refusal(detected: object) -> None:
         detected=detected,
         range=_supported_range_label(),
     )
-    sys.stdout.write("{prefix} {line}\n".format(prefix=log._FAILED_PREFIX, line=line))
-    sys.stdout.flush()
+    # Routed through the logger's encoding-defensive writer: the refusal
+    # prefix carries the ✗ glyph, which must not raise on ASCII stdout.
+    log._write_stdout("{prefix} {line}\n".format(prefix=log._FAILED_PREFIX, line=line))
 
 
 def _read_nuke_version_major() -> Optional[int]:

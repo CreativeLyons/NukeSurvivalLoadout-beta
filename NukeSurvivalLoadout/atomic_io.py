@@ -52,12 +52,19 @@ def write_atomic(path: PathLike, content: Union[str, bytes]) -> None:
     if isinstance(content, bytes):
         mode = "wb"
         payload: Union[str, bytes] = content
+        open_kwargs: dict = {}
     else:
         mode = "w"
         payload = content
+        # Text writes are pinned to UTF-8 + LF so the bytes never depend
+        # on the host locale (LANG=C farm sessions resolve the default
+        # encoding to ASCII) and are identical on every platform.
+        # Rendered loadout files are Python source; Python 3 parses
+        # source as UTF-8, so the write side must guarantee UTF-8.
+        open_kwargs = {"encoding": "utf-8", "newline": "\n"}
 
     try:
-        with open(tmp, mode) as fh:
+        with open(tmp, mode, **open_kwargs) as fh:
             fh.write(payload)
             fh.flush()
             os.fsync(fh.fileno())

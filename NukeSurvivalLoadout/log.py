@@ -22,9 +22,29 @@ _FAILED_PREFIX = "NSL Failed ✗"
 _WARNING_PREFIX = "NSL Warning:"
 
 
-def _emit(line: str) -> None:
-    sys.stdout.write(line + "\n")
+def _write_stdout(text: str) -> None:
+    """Write ``text`` to stdout, surviving non-UTF-8 stdout encodings.
+
+    Headless Linux sessions (LANG=C render farms) can resolve
+    ``sys.stdout.encoding`` to ASCII, where the ``✗`` prefix glyph or a
+    non-ASCII plugin name raises ``UnicodeEncodeError`` from inside the
+    logger - and a log call must never abort a boot pass (``loading()``
+    runs on the Global loader path with no exception wrapper). On encode
+    failure the line is re-emitted with unencodable characters replaced.
+    """
+    try:
+        sys.stdout.write(text)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+        degraded = text.encode(encoding, errors="replace").decode(
+            encoding, errors="replace"
+        )
+        sys.stdout.write(degraded)
     sys.stdout.flush()
+
+
+def _emit(line: str) -> None:
+    _write_stdout(line + "\n")
 
 
 def loading(plugin_name: str) -> None:
@@ -65,8 +85,7 @@ def traceback_block(tb: str) -> None:
     """
     if not tb:
         return
-    sys.stdout.write(tb.rstrip("\n") + "\n")
-    sys.stdout.flush()
+    _write_stdout(tb.rstrip("\n") + "\n")
 
 
 def warning(message: str) -> None:
@@ -81,5 +100,4 @@ def critical_phase_failed(phase: str, exc: BaseException) -> None:
         exc=exc,
     ))
     tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-    sys.stdout.write(tb)
-    sys.stdout.flush()
+    _write_stdout(tb)

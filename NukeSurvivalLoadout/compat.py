@@ -37,7 +37,7 @@ import importlib
 from types import ModuleType
 from typing import Tuple
 
-__all__ = ["QtCore", "QtWidgets", "QtGui", "PYSIDE_VERSION"]
+__all__ = ["QtCore", "QtWidgets", "QtGui", "PYSIDE_VERSION", "run_modal"]
 
 
 def _resolve_pyside() -> Tuple[ModuleType, ModuleType, ModuleType, int]:
@@ -64,3 +64,20 @@ def _resolve_pyside() -> Tuple[ModuleType, ModuleType, ModuleType, int]:
 
 
 QtCore, QtWidgets, QtGui, PYSIDE_VERSION = _resolve_pyside()
+
+
+def run_modal(qt_object, *args):
+    """Run a modal exec loop on ``qt_object`` across PySide2 and PySide6.
+
+    PySide6 exposes ``exec()``; PySide2 exposes only ``exec_()`` - verified
+    empirically against the bindings Nuke actually bundles (PySide2 5.15.2.1
+    in Nuke 14.1/15.2 has no ``exec`` alias). Probed by attribute, never by
+    version table, so future bindings keep working without maintenance.
+
+    Works for any modal-exec Qt object: ``QDialog`` / ``QMessageBox`` take
+    no args, ``QMenu`` takes the optional global position.
+    """
+    exec_method = getattr(qt_object, "exec", None)
+    if exec_method is None:
+        exec_method = qt_object.exec_
+    return exec_method(*args)
