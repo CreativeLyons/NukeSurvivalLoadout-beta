@@ -67,15 +67,17 @@ def render(state: DispatcherState) -> str:
     """Return the canonical dispatcher text for ``state``.
 
     Pure: same input always produces the same bytes. Quoting of
-    ``state.active`` uses ``repr`` so names containing quotes, backslashes,
-    or other surprises serialize as valid Python literals.
+    ``state.active`` and every folder path uses ``repr`` so names and
+    paths containing quotes, backslashes (Windows paths like
+    ``C:\\Users\\...`` would otherwise be escape-sequence soup), or other
+    surprises serialize as valid Python literals.
     """
     panic_literal = "True" if state.panic else "False"
     active_literal = repr(state.active)
 
     if state.folders:
         folder_lines = "".join(
-            f'{f.var} = "{f.path}"\n' for f in state.folders
+            f"{f.var} = {f.path!r}\n" for f in state.folders
         )
         folder_block = (
             "\n"

@@ -42,10 +42,25 @@ _ERR_EMPTY_STEM = "Loadout name cannot be empty."
 _ERR_STEM_TOO_LONG = (
     f"Loadout name cannot exceed {LOADOUT_FILENAME_MAX_STEM_LEN} characters."
 )
+_ERR_RESERVED_DEVICE = (
+    "`{name}` is a reserved device name on Windows and cannot be used as "
+    "a folder name. Choose a different name."
+)
 
 
 _ALLOWED_STEM_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+)
+
+# Windows reserved device names (any case): such a directory cannot be
+# created or opened through the normal Win32 namespace. Rejected on
+# EVERY platform - a loadout folder is portable data (synced dotfiles,
+# studio-shared setups), and a `con` folder created on macOS would be
+# unopenable on a Windows box.
+_WINDOWS_RESERVED_DEVICE_STEMS = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{i}" for i in range(1, 10)}
+    | {f"lpt{i}" for i in range(1, 10)}
 )
 
 
@@ -92,6 +107,8 @@ def validate_filename(name: str) -> ValidationResult:
       * No leading dot or underscore in the stem.
       * Reserved stem `Global` (case-insensitive).
       * Reserved stem `Custom` (case-insensitive).
+      * Windows reserved device names (CON, PRN, AUX, NUL, COM1-9,
+        LPT1-9; case-insensitive) rejected on every platform.
       * Stem length cap (``LOADOUT_FILENAME_MAX_STEM_LEN`` characters).
       * Empty stem rejected.
     """
@@ -112,6 +129,11 @@ def validate_filename(name: str) -> ValidationResult:
     if stem.lower() == DEFAULT_CUSTOM_LOADOUT_STEM.lower():
         return ValidationResult(False, stem, _ERR_RESERVED_CUSTOM)
 
+    if stem.lower() in _WINDOWS_RESERVED_DEVICE_STEMS:
+        return ValidationResult(
+            False, stem, _ERR_RESERVED_DEVICE.format(name=stem)
+        )
+
     if len(stem) > LOADOUT_FILENAME_MAX_STEM_LEN:
         return ValidationResult(False, stem, _ERR_STEM_TOO_LONG)
 
@@ -130,8 +152,12 @@ def next_available_name(base: str, existing: Iterable[str]) -> str:
     `existing`.
 
     `existing` is consumed once; pass a set/list/tuple/generator of bare
-    stems. Comparison is case-sensitive, matching case-preserved filesystem
-    semantics. The returned value is always a bare stem.
+    stems. Comparison is CASE-INSENSITIVE (casefold): the target
+    filesystems (NTFS always, default macOS APFS) treat `Foo` and `foo`
+    as the same directory, so a case-sensitive check would let a new
+    `Foo` silently write into an existing `foo`. The returned value
+    keeps the caller's case (filesystems are case-preserving; so is
+    NSL).
 
     Raises ValueError when `base` cannot produce a valid name (e.g.
     empty, disallowed characters). Callers should run `validate_filename`
@@ -141,14 +167,14 @@ def next_available_name(base: str, existing: Iterable[str]) -> str:
     if not stem:
         raise ValueError(_ERR_EMPTY_STEM)
 
-    taken = set(existing)
+    taken = {name.casefold() for name in existing}
     candidate = stem
-    if candidate not in taken:
+    if candidate.casefold() not in taken:
         return candidate
     suffix = 2
     while True:
         candidate = f"{stem}_{suffix}"
-        if candidate not in taken:
+        if candidate.casefold() not in taken:
             return candidate
         suffix += 1
 

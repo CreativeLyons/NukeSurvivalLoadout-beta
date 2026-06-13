@@ -45,6 +45,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
+import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional, Union
@@ -103,6 +105,10 @@ class BlockedReason:
     INVALID_NAME = "invalid_name"
     SOURCE_NOT_FOUND = "source_not_found"
     NAME_COLLISION = "name_collision"
+    # Filesystem refused the mutation (Windows share locks on open
+    # folders, permission walls). The op did not complete; surfaced as a
+    # refusal instead of a raw traceback through the Qt signal layer.
+    FS_ERROR = "fs_error"
 
 
 @dataclass(frozen=True)
@@ -189,10 +195,47 @@ def _validate_or_blocked(name: str) -> Union[str, Blocked]:
     return result.filename
 
 
-def _next_free_name(loadouts_dir: Path, stem: str) -> str:
-    """Return the lowest-numbered non-colliding loadout folder name."""
+def _next_free_name(
+    loadouts_dir: Path, stem: str, *, exclude: Optional[str] = None
+) -> str:
+    """Return the lowest-numbered non-colliding loadout folder name.
+
+    Collision matching is casefolded (see ``next_available_name``).
+    ``exclude`` removes one exact name from the taken set - rename
+    passes its own source name so a case-only rename (``foo`` ->
+    ``Foo``) lands on the new casing instead of being suffixed to
+    ``Foo_2`` by colliding with itself.
+    """
     taken = set(_existing_loadout_names(loadouts_dir))
+    if exclude is not None:
+        taken.discard(exclude)
     return next_available_name(stem, taken)
+
+
+def _rmtree_force(path: Path) -> None:
+    """``shutil.rmtree`` that clears the read-only attribute and retries.
+
+    On Windows, files copied from read-only media (or stamped read-only
+    by tooling) make plain ``rmtree`` raise where POSIX deletes. The
+    handler chmods the failing entry writable and retries that one
+    operation; anything still failing propagates to the caller.
+    """
+
+    def _retry_writable(func, target, _exc):
+        os.chmod(target, stat.S_IWRITE)
+        func(target)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_retry_writable)
+    else:
+        # Pre-3.12 spelling: onerror receives an excinfo TUPLE (and is
+        # deprecated from 3.12, hence the branch above).
+        shutil.rmtree(
+            path,
+            onerror=lambda func, target, excinfo: _retry_writable(
+                func, target, excinfo[1]
+            ),
+        )
 
 
 def _write_dispatcher(loadouts_dir: Path, state: DispatcherState) -> None:
@@ -352,9 +395,22 @@ def rename(
             ),
         )
 
-    final_name = _next_free_name(target_dir, validated)
+    final_name = _next_free_name(target_dir, validated, exclude=current_name)
     new_folder = target_dir / final_name
-    os.rename(src_folder, new_folder)
+    try:
+        os.rename(src_folder, new_folder)
+    except OSError as exc:
+        # Windows refuses while any file inside is open elsewhere;
+        # surface as a refusal, not a traceback. Nothing changed on disk.
+        return OpResult(
+            path=None,
+            model=None,
+            state=state,
+            blocked=Blocked(
+                code=BlockedReason.FS_ERROR,
+                detail=f"Could not rename {src_folder.name}: {exc}",
+            ),
+        )
 
     new_state = state
     if state.active == current_name:
@@ -397,7 +453,21 @@ def delete(
             ),
         )
 
-    shutil.rmtree(target_folder)
+    try:
+        _rmtree_force(target_folder)
+    except OSError as exc:
+        # Open handles / permission walls (routine on Windows). A
+        # partial delete may have occurred; the pointer is untouched and
+        # the survivors stay listable.
+        return OpResult(
+            path=None,
+            model=None,
+            state=state,
+            blocked=Blocked(
+                code=BlockedReason.FS_ERROR,
+                detail=f"Could not delete {target_folder.name}: {exc}",
+            ),
+        )
 
     new_state = state
     if state.active == name:
@@ -438,7 +508,18 @@ def duplicate(
 
     final_name = _next_free_name(target_dir, validated)
     new_folder = target_dir / final_name
-    shutil.copytree(src_folder, new_folder)
+    try:
+        shutil.copytree(src_folder, new_folder)
+    except OSError as exc:
+        return OpResult(
+            path=None,
+            model=None,
+            state=state,
+            blocked=Blocked(
+                code=BlockedReason.FS_ERROR,
+                detail=f"Could not duplicate {src_folder.name}: {exc}",
+            ),
+        )
 
     new_state = _state_with_active(state, final_name)
     _write_dispatcher(target_dir, new_state)

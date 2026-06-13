@@ -47,6 +47,7 @@ from NukeSurvivalLoadout.boot.dispatcher import DispatcherState
 from NukeSurvivalLoadout.data.loadout_file import LoadoutFile, PluginEntry
 from NukeSurvivalLoadout.domain import loadout_ops
 from NukeSurvivalLoadout.domain.scanner import Plugin, scan_folder
+from NukeSurvivalLoadout.paths import canon_for_compare
 from NukeSurvivalLoadout.domain.undo_stack import UndoStackRegistry
 from NukeSurvivalLoadout.ui import dialogs
 
@@ -1544,7 +1545,7 @@ class Registry:
         resolved_entries = resolved.plugins if resolved is not None else {}
         plugins: dict[str, PluginEntry] = {}
         for name, plugin in self.discovered_plugins.items():
-            if os.path.normpath(plugin.path) in loaded_paths:
+            if canon_for_compare(plugin.path) in loaded_paths:
                 plugins[name] = resolved_entries.get(
                     name, PluginEntry(enabled=True, gui_only=False)
                 )
@@ -1552,7 +1553,11 @@ class Registry:
 
     @staticmethod
     def _nuke_loaded_paths() -> Optional[set]:
-        """Return the normalised set of folders on Nuke's live plugin path.
+        """Return the canonicalised set of folders on Nuke's live plugin path.
+
+        Keys are ``canon_for_compare`` forms (case-folded on Windows) so
+        membership tests don't miss on drive-letter/slash-case quirks in
+        what ``nuke.pluginPath()`` echoes back.
 
         ``None`` (not an empty set) signals "Nuke unavailable" so the caller
         can fall back; an empty set is a legitimate "Nuke loaded nothing".
@@ -1565,7 +1570,7 @@ class Registry:
         if plugin_path is None:
             return None
         try:
-            return {os.path.normpath(p) for p in plugin_path()}
+            return {canon_for_compare(p) for p in plugin_path()}
         except Exception:  # noqa: BLE001 - never let a Nuke API quirk break the panel
             return None
 

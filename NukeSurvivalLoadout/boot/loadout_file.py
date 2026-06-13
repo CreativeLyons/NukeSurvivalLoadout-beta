@@ -83,7 +83,11 @@ class PluginEntry:
 
 @dataclass
 class FolderDecl:
-    """One ``plugins_X = "/abs/path"`` assignment at file top."""
+    """One ``plugins_X = '<abs path>'`` string assignment at file top.
+
+    Written with ``repr`` quoting; read back via AST, so either quote
+    style (including pre-fix double-quoted files) round-trips.
+    """
 
     var: str
     path: str
@@ -438,7 +442,10 @@ def _render_canonical_prefix(model: LoadoutModel) -> str:
     if model.folders:
         parts.append(f"{_FOLDERS_HEADER}\n")
         for folder in model.folders:
-            parts.append(f'{folder.var} = "{folder.path}"\n')
+            # repr, not a hand-rolled quoted literal: Windows paths carry
+            # backslashes ("C:\Users\..." is a SyntaxError as a plain
+            # double-quoted literal; "C:\temp" silently becomes a tab).
+            parts.append(f"{folder.var} = {folder.path!r}\n")
         parts.append("\n\n")
 
     parts.append(f"{_HELPER_HEADER}\n")
@@ -512,8 +519,12 @@ def _render_managed_block(model: LoadoutModel) -> str:
 
 
 def _render_plugin_call(entry: PluginEntry) -> str:
-    """Render one ``nsl_pluginAddPath(...)`` call with optional kwargs + comment."""
-    args = [f"folder={entry.folder_var}", f'name="{entry.name}"']
+    """Render one ``nsl_pluginAddPath(...)`` call with optional kwargs + comment.
+
+    ``name`` is quoted with ``repr``: plugin names come from on-disk folder
+    basenames, which can legally contain quotes on POSIX/macOS.
+    """
+    args = [f"folder={entry.folder_var}", f"name={entry.name!r}"]
     if entry.gui:
         args.append("gui=True")
     if entry.disabled:

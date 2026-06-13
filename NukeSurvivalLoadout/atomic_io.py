@@ -14,11 +14,17 @@ OSError is propagated unchanged; callers wrap.
 from __future__ import annotations
 
 import os
+import time
 from typing import Union
 
 __all__ = ["write_atomic", "ensure_parent_dir", "sweep_orphan_tmp"]
 
 PathLike = Union[str, "os.PathLike[str]"]
+
+# Windows replace-retry tuning: ~0.75s worst case across 4 sleeps
+# (0.05 + 0.1 + 0.2 + 0.4) before the final attempt propagates.
+_REPLACE_RETRIES = 4
+_REPLACE_INITIAL_DELAY = 0.05
 
 
 def ensure_parent_dir(path: PathLike) -> None:
@@ -32,6 +38,30 @@ def ensure_parent_dir(path: PathLike) -> None:
         os.makedirs(parent, exist_ok=True)
 
 
+def _replace_with_retry(tmp: str, target: str) -> None:
+    """``os.replace`` with a bounded ``PermissionError`` retry on Windows.
+
+    NTFS replace needs DELETE access on the target; antivirus scanners,
+    the search indexer, and sync clients hold transient share locks that
+    make a momentarily-unlucky replace raise where POSIX rename always
+    succeeds. Retrying a few times with a short growing sleep rides out
+    the scan window; the final failure propagates unchanged. POSIX takes
+    the plain single call.
+    """
+    if os.name != "nt":
+        os.replace(tmp, target)
+        return
+    delay = _REPLACE_INITIAL_DELAY
+    for _ in range(_REPLACE_RETRIES):
+        try:
+            os.replace(tmp, target)
+            return
+        except PermissionError:
+            time.sleep(delay)
+            delay *= 2
+    os.replace(tmp, target)
+
+
 def write_atomic(path: PathLike, content: Union[str, bytes]) -> None:
     """Write ``content`` to ``path`` via write-to-temp-then-rename.
 
@@ -39,10 +69,13 @@ def write_atomic(path: PathLike, content: Union[str, bytes]) -> None:
       1. ``ensure_parent_dir(path)`` so callers get lazy folder creation.
       2. Write the full payload to a sibling ``<path>.tmp``.
       3. ``os.replace`` the temp file over the target - same-dir, atomic
-         on POSIX and NTFS.
+         on POSIX and NTFS (with a bounded share-lock retry on Windows,
+         see ``_replace_with_retry``).
 
     If the write to the temp file raises, the temp file is removed and the
-    original target is left untouched. ``OSError`` from any step propagates.
+    original target is left untouched. ``OSError`` from any step propagates
+    (a temp file orphaned by a failed final replace is reclaimed by
+    ``sweep_orphan_tmp``).
     """
     target = os.fspath(path)
     ensure_parent_dir(target)
@@ -75,7 +108,7 @@ def write_atomic(path: PathLike, content: Union[str, bytes]) -> None:
             pass
         raise
 
-    os.replace(tmp, target)
+    _replace_with_retry(tmp, target)
 
 
 def sweep_orphan_tmp(folder: PathLike) -> int:

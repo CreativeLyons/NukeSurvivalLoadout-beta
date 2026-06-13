@@ -19,6 +19,7 @@ from typing import Optional
 
 from NukeSurvivalLoadout import log
 from NukeSurvivalLoadout.boot.dispatcher import DispatcherState, read_dispatcher
+from NukeSurvivalLoadout.constants import loadouts_dir
 
 
 __all__ = ["BootResult", "run_boot_sequence"]
@@ -32,7 +33,9 @@ class BootResult:
 
 
 def _loadouts_init_path() -> str:
-    return os.path.expanduser("~/.nuke/loadouts/init.py")
+    # constants.loadouts_dir() resolves HOME-first, matching Nuke's own
+    # ~/.nuke lookup on Windows (plain expanduser would not).
+    return os.fspath(loadouts_dir() / "init.py")
 
 
 def run_boot_sequence() -> BootResult:

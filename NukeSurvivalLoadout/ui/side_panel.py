@@ -1016,11 +1016,15 @@ def _open_path_in_editor(path: Optional[str]) -> bool:
 
     * macOS - ``open -t`` opens the user's default *text editor* (rather than
       whatever app ``.py`` is associated with, which might try to *run* it).
-    * Windows - ``os.startfile`` uses the default handler for ``.py``.
+    * Windows - the ``edit`` shell verb (registered editor), falling back
+      to Notepad. NEVER the default verb: with a Python install present,
+      the ``.py`` default association is typically py.exe, which would
+      EXECUTE the plugin's script instead of opening it - the same hazard
+      the macOS ``-t`` flag dodges.
     * Linux - ``xdg-open`` uses the default handler.
 
     Uses the shell ``open``/``xdg-open`` tools rather than
-    ``QDesktopServices`` so we can force the text-editor intent on macOS.
+    ``QDesktopServices`` so we can force the text-editor intent.
     """
     import os
     import subprocess
@@ -1032,7 +1036,11 @@ def _open_path_in_editor(path: Optional[str]) -> bool:
         if _sys.platform == "darwin":
             subprocess.Popen(["open", "-t", path])
         elif os.name == "nt":
-            os.startfile(path)  # type: ignore[attr-defined]  # noqa: S606
+            try:
+                os.startfile(path, "edit")  # type: ignore[attr-defined]  # noqa: S606
+            except OSError:
+                # No ``edit`` verb registered for .py on this machine.
+                subprocess.Popen(["notepad.exe", path])
         else:
             subprocess.Popen(["xdg-open", path])
         return True

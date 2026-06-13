@@ -48,6 +48,7 @@ from NukeSurvivalLoadout.boot.loadout_file import (
 from NukeSurvivalLoadout.data.loadout_file import LoadoutFile, PluginEntry
 from NukeSurvivalLoadout.domain import folder_ops, loadout_ops
 from NukeSurvivalLoadout.domain.undo_stack import UndoStack, UndoStackRegistry
+from NukeSurvivalLoadout.paths import canon_for_compare
 
 
 __all__ = ["wire_events"]
@@ -1155,11 +1156,11 @@ def _discovered_names_from_folder(registry, folder_path: str) -> list:
     changed state (the discovered plugins are pending and only become real
     on Save), so the match must be robust to path representation.
     """
-    target = os.path.normpath(folder_path)
+    target = canon_for_compare(folder_path)
     discovered = getattr(registry, "discovered_plugins", None) or {}
     return [
         name for name, plugin in discovered.items()
-        if os.path.normpath(getattr(plugin, "source", "") or "") == target
+        if canon_for_compare(getattr(plugin, "source", "") or "") == target
     ]
 
 

@@ -5,20 +5,54 @@ Every other NSL module imports from here. No string literals duplicated downstre
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
 # -- Loadouts folder -------------------------------------------------------
 # Loadouts: where files live. Default save location is
-# ~/.nuke/loadouts/. Resolved at access time via Path.home() so HOME
-# can be overridden.
+# ~/.nuke/loadouts/. Resolved at access time (not import time) so an
+# env change is picked up. NOT Path.home(): on Windows, Python 3.8+
+# Path.home()/expanduser ignore HOME (USERPROFILE only), while Nuke
+# itself resolves ~/.nuke from HOME first when set - nuke_user_dir()
+# mirrors Nuke's documented lookup so NSL and Nuke always agree on
+# which .nuke tree is live.
+
 
 NUKE_DIR_NAME = ".nuke"
 LOADOUTS_DIR_NAME = "loadouts"
 
 
+def nuke_user_dir() -> Path:
+    """The directory Nuke resolves ``~/.nuke`` under.
+
+    Mirrors Nuke's documented lookup order: ``HOME`` when set (on every
+    platform - including Windows, where Python 3.8+ ``expanduser`` no
+    longer consults it), otherwise the OS user profile via
+    ``expanduser``. On POSIX this is behavior-identical to plain
+    ``expanduser("~")``; empty ``HOME`` counts as unset.
+    """
+    home = os.environ.get("HOME")
+    if home:
+        return Path(home)
+    if os.name == "nt":
+        # Windows expanduser ignores HOME entirely (USERPROFILE, then
+        # HOMEDRIVE+HOMEPATH) - exactly Nuke's fallback order.
+        return Path(os.path.expanduser("~"))
+    # POSIX with HOME unset or empty: skip expanduser (an empty HOME is
+    # echoed back and collapses to "/") and resolve from the account
+    # database directly.
+    try:
+        import pwd
+
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (ImportError, KeyError):
+        # No passwd entry (bare container): degrade like expanduser.
+        return Path(os.path.expanduser("~"))
+
+
 def loadouts_dir() -> Path:
-    return Path.home() / NUKE_DIR_NAME / LOADOUTS_DIR_NAME
+    return nuke_user_dir() / NUKE_DIR_NAME / LOADOUTS_DIR_NAME
 
 
 # -- Loadout names ----------------------------------------------------------

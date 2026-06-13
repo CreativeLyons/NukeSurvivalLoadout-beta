@@ -12,6 +12,8 @@ import os
 
 import nuke
 
+from NukeSurvivalLoadout.paths import canon_for_compare
+
 
 def record_global_dir(path: str) -> None:
     """Record the resolved Global plugins dir for this session.
@@ -40,6 +42,9 @@ def record_loaded(name: str, path: str, gui: bool = False) -> None:
     if rec is None:
         rec = nuke._nsl_loaded_session = []
     norm = os.path.normpath(path)
-    if any(item.get("path") == norm for item in rec):
+    # Dedup by case-folded identity (Windows/APFS are case-insensitive);
+    # the stored path keeps its original case for display.
+    key = canon_for_compare(norm)
+    if any(canon_for_compare(item.get("path", "")) == key for item in rec):
         return
     rec.append({"name": name, "path": norm, "gui": bool(gui)})

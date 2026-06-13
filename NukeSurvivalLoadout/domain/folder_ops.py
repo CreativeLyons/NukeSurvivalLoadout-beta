@@ -46,6 +46,7 @@ from dataclasses import dataclass, replace
 from typing import FrozenSet, Iterable, List, Optional, Sequence, Tuple, Union
 
 from NukeSurvivalLoadout.boot.loadout_file import FolderDecl, LoadoutModel, write_loadout
+from NukeSurvivalLoadout.paths import canon_for_compare
 from NukeSurvivalLoadout.constants import (
     GLOBAL_PLUGINS_VAR_NAME,
     PLUGIN_FOLDER_IGNORE_NAMES,
@@ -212,6 +213,13 @@ class ReorderError(Exception):
 
 
 def _normalise(path: PathLike) -> str:
+    """The STORED form of a folder path - separators/dots unified, case kept.
+
+    Identity COMPARISONS use :func:`canon_for_compare` instead, which
+    additionally folds case so the same folder typed/picked with
+    different casing matches on case-insensitive filesystems
+    (Windows, default macOS APFS).
+    """
     return os.path.normpath(os.fspath(path))
 
 
@@ -286,7 +294,8 @@ def add_folder(model: LoadoutModel, path: PathLike) -> AddResult:
     if not os.access(norm, os.R_OK):
         raise FolderValidationError(norm, "no read permission")
 
-    if any(_normalise(decl.path) == norm for decl in model.folders):
+    target_key = canon_for_compare(norm)
+    if any(canon_for_compare(decl.path) == target_key for decl in model.folders):
         raise FolderAlreadyConfigured(norm)
 
     new_var = _next_folder_var(decl.var for decl in model.folders)
@@ -326,9 +335,10 @@ def remove_folder(
         ``FolderNotConfigured`` if ``path`` is not in ``model.folders``.
     """
     norm = _normalise(path)
+    target_key = canon_for_compare(norm)
     match_index: Optional[int] = None
     for idx, decl in enumerate(model.folders):
-        if _normalise(decl.path) == norm:
+        if canon_for_compare(decl.path) == target_key:
             match_index = idx
             break
     if match_index is None:
@@ -369,8 +379,8 @@ def reorder(
     global_decls = [
         decl for decl in model.folders if decl.var == GLOBAL_PLUGINS_VAR_NAME
     ]
-    current_paths = [_normalise(decl.path) for decl in user_decls]
-    incoming = [_normalise(p) for p in new_order]
+    current_paths = [canon_for_compare(decl.path) for decl in user_decls]
+    incoming = [canon_for_compare(p) for p in new_order]
 
     if len(incoming) != len(current_paths):
         raise ReorderError(
@@ -386,7 +396,7 @@ def reorder(
     # Preserve each folder's existing ``var`` assignment when reordering -
     # the loadout's plugin call lines still reference those vars and we
     # don't want a benign reorder to invalidate every plugin call.
-    by_path = {_normalise(decl.path): decl for decl in user_decls}
+    by_path = {canon_for_compare(decl.path): decl for decl in user_decls}
     reordered = [by_path[p] for p in incoming]
     return _with_folders(model, [*reordered, *global_decls])
 

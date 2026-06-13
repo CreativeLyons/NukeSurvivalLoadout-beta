@@ -45,7 +45,13 @@ from NukeSurvivalLoadout.boot.sequence import run_boot_sequence  # noqa: E402
 
 
 def _loadouts_dir() -> str:
-    return os.path.expanduser("~/.nuke/loadouts")
+    # Routed through constants so the HOME-first resolution (Nuke's own
+    # ~/.nuke lookup on Windows) has exactly one implementation. Lazy
+    # import, matching _global_dir below - the sys.path insert above
+    # must run before any NukeSurvivalLoadout import.
+    from NukeSurvivalLoadout.constants import loadouts_dir
+
+    return str(loadouts_dir())
 
 
 def _global_dir() -> str:
