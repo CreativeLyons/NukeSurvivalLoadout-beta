@@ -37,6 +37,7 @@ from typing import Optional
 
 from NukeSurvivalLoadout import atomic_io
 from NukeSurvivalLoadout.constants import GLOBAL_PLUGINS_VAR_NAME
+from NukeSurvivalLoadout.paths import canon_for_compare
 
 __all__ = [
     "BEGIN_MARKER",
@@ -701,9 +702,34 @@ def sync_folders(
     the dispatcher only carries user-added folders, so the Global folder
     var (written by Save for Global-plugin overrides) is preserved
     verbatim rather than pruned as "removed from canonical".
+
+    **Path identity is canonical, not byte-exact.** Both sides of the remap
+    are keyed through :func:`NukeSurvivalLoadout.paths.canon_for_compare`
+    (``normpath`` + ``normcase``), so representation drift between a stored
+    folder path and the matching canonical decl - a trailing separator, a
+    ``.``/``..`` segment, or (on Windows / default macOS) a case-only
+    difference - still resolves to the same folder. Keying on raw strings
+    would miss on any such drift and prune every entry for that folder,
+    silently losing the user's disabled / gui-only exceptions. This mirrors
+    how ``folder_ops`` already compares folder identity.
     """
+    # Map canonical path-key -> the *old* path string, so a hit lets us look
+    # up the new var. When two of this model's decls canonicalize to the same
+    # key (e.g. a hand edit that left both "/a/b" and "/a/b/"), keep the first
+    # and skip the rest: silently overwriting would make the remap depend on
+    # decl order. The duplicate's entries still resolve via the first decl's
+    # path, since both share one canonical key.
     old_var_to_path = {f.var: f.path for f in model.folders}
-    path_to_new_var = {f.path: f.var for f in canonical}
+
+    # Map canonical path-key -> new var from ``canonical``. Same first-wins
+    # policy on duplicate canonical keys; the dispatcher should never hand us
+    # duplicates, but a defensive skip beats an order-dependent overwrite.
+    path_to_new_var: dict[str, str] = {}
+    for decl in canonical:
+        key = canon_for_compare(decl.path)
+        if key in path_to_new_var:
+            continue  # duplicate canonical folder in canonical - keep first
+        path_to_new_var[key] = decl.var
 
     global_decls = [f for f in model.folders if f.var == GLOBAL_PLUGINS_VAR_NAME]
 
@@ -716,7 +742,7 @@ def sync_folders(
         old_path = old_var_to_path.get(entry.folder_var)
         if old_path is None:
             continue  # entry referenced an undeclared var - drop (Guard)
-        new_var = path_to_new_var.get(old_path)
+        new_var = path_to_new_var.get(canon_for_compare(old_path))
         if new_var is None:
             continue  # folder removed from canonical - prune this entry
         new_plugins.append(replace(entry, folder_var=new_var))
