@@ -143,7 +143,7 @@ def _build_chain_model(
     # One FolderDecl per configured user plugin folder, in configured order.
     user_dirs = list(getattr(registry, "user_plugin_dirs", []) or [])
     folders = [
-        FolderDecl(var=f"plugins_{chr(ord('A') + idx)}", path=path)
+        FolderDecl(var=folder_ops.canonical_folder_var(idx), path=path)
         for idx, path in enumerate(user_dirs)
     ]
 
@@ -1387,7 +1387,7 @@ def _add_folder_in_memory(registry, chosen: str) -> bool:
 
     existing_model = LoadoutModel(
         folders=[
-            FolderDecl(var=f"plugins_{chr(ord('A') + idx)}", path=path)
+            FolderDecl(var=folder_ops.canonical_folder_var(idx), path=path)
             for idx, path in enumerate(registry.user_plugin_dirs)
         ]
     )

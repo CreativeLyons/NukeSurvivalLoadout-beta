@@ -51,7 +51,7 @@ from NukeSurvivalLoadout.constants import (
     RESERVED_LOADOUT_STEM,
 )
 from NukeSurvivalLoadout.data.loadout_file import LoadoutFile, PluginEntry
-from NukeSurvivalLoadout.domain import loadout_ops
+from NukeSurvivalLoadout.domain import folder_ops, loadout_ops
 from NukeSurvivalLoadout.domain.undo_stack import UndoStack, UndoStackRegistry
 from NukeSurvivalLoadout.ui.filter_pipeline import bulk_target_keys
 
@@ -99,7 +99,7 @@ def _build_routing_map(registry) -> dict:
     """
     user_dirs = list(getattr(registry, "user_plugin_dirs", []) or [])
     var_for_path = {
-        path: f"plugins_{chr(ord('A') + idx)}"
+        path: folder_ops.canonical_folder_var(idx)
         for idx, path in enumerate(user_dirs)
     }
     discovered = getattr(registry, "discovered_plugins", {}) or {}
@@ -145,7 +145,7 @@ def _build_chain_from_legacy(
         base_model = read_chain_loadout(str(target))
     except (OSError, SyntaxError):
         folders = [
-            FolderDecl(var=f"plugins_{chr(ord('A') + idx)}", path=path)
+            FolderDecl(var=folder_ops.canonical_folder_var(idx), path=path)
             for idx, path in enumerate(user_dirs)
         ]
         base_model = LoadoutModel(folders=folders)
