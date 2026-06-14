@@ -435,7 +435,14 @@ def _render_canonical_prefix(model: LoadoutModel) -> str:
     """
     parts: list[str] = []
     if model.docstring:
-        parts.append(f'"""{model.docstring}\n"""\n\n')
+        # repr, not a raw triple-quote wrap: the docstring is a parsed value
+        # (delimiters already stripped by ast.get_docstring), so a hand-edited
+        # docstring carrying its own ``"""``, a trailing quote, or a backslash
+        # would re-render as invalid Python if interpolated raw. Emitting it as
+        # a repr() string literal - the module's first statement - keeps it a
+        # valid docstring that round-trips back to the same value. Mirrors the
+        # repr() quoting used for folder paths and plugin names below.
+        parts.append(f"{model.docstring!r}\n\n")
     parts.append(_IMPORTS_BLOCK)
     parts.append("\n\n")
 
@@ -542,8 +549,18 @@ def _render_plugin_call(entry: PluginEntry) -> str:
 
 
 def write_loadout(path: str, model: LoadoutModel) -> None:
-    """Render ``model`` and atomically replace ``path``."""
-    atomic_io.write_atomic(path, render(model))
+    """Render ``model`` and atomically replace ``path``.
+
+    The rendered source is ``compile()``-checked before it is written: a
+    loadout file is Python that Nuke executes at boot, so emitting one that
+    won't parse would be a latent boot failure. Compiling here turns any
+    rendering defect into a raised ``SyntaxError`` *before* ``write_atomic``
+    replaces a known-good file on disk, so a bad render can't clobber a
+    working loadout.
+    """
+    rendered = render(model)
+    compile(rendered, "<loadout>", "exec")
+    atomic_io.write_atomic(path, rendered)
 
 
 # ---------------------------------------------------------------------------
