@@ -118,12 +118,32 @@ _HELPER_HEADER = "# ─── Plugin loading functions ────────�
 # copied to another machine, panic mode) loses nothing by skipping it.
 # The loaders below stay inline so the file is self-contained at boot.
 _HELPER_DEF = (
+    "import sys\n"
+    "\n"
     "_NSL_HANDLED = set()\n"
     "\n"
     "try:\n"
     "    from NukeSurvivalLoadout.boot.session_record import record_loaded as _nsl_record\n"
     "except Exception:\n"
     "    def _nsl_record(name, path, gui=False):\n"
+    "        pass\n"
+    "\n"
+    "def _nsl_log(text):\n"
+    "    # Self-contained mirror of log._write_stdout: a copied loadout runs\n"
+    "    # without the NSL package importable, so it can't reuse the in-process\n"
+    "    # logger. An ASCII / LANG=C stdout would otherwise raise\n"
+    "    # UnicodeEncodeError on a non-ASCII plugin name BEFORE pluginAddPath,\n"
+    "    # silently skipping the plugin. Logging must never abort a boot pass,\n"
+    "    # so every failure here is swallowed.\n"
+    "    try:\n"
+    "        try:\n"
+    "            sys.stdout.write(text)\n"
+    "        except UnicodeEncodeError:\n"
+    '            enc = getattr(sys.stdout, "encoding", None) or "ascii"\n'
+    '            degraded = text.encode(enc, "replace").decode(enc, "replace")\n'
+    "            sys.stdout.write(degraded)\n"
+    "        sys.stdout.flush()\n"
+    "    except Exception:\n"
     "        pass\n"
     "\n"
     "def nsl_pluginAddPath(folder, name, gui=False, disabled=False):\n"
@@ -134,7 +154,7 @@ _HELPER_DEF = (
     "        return\n"
     "    path = os.path.join(folder, name)\n"
     "    if os.path.isdir(path):\n"
-    '        print("NSL Loading... " + name)\n'
+    '        _nsl_log("NSL Loading... " + name + "\\n")\n'
     "        nuke.pluginAddPath(path)\n"
     "        _nsl_record(name, path, gui)\n"
     "\n"
