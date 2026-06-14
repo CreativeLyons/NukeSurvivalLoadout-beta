@@ -27,23 +27,20 @@ from NukeSurvivalLoadout.constants import (
 
 def _supported_range_label() -> str:
     if SUPPORTED_NUKE_VERSION_MAX is None:
-        return "Nuke {min} and later".format(min=SUPPORTED_NUKE_VERSION_MIN)
+        return f"Nuke {SUPPORTED_NUKE_VERSION_MIN} and later"
     if SUPPORTED_NUKE_VERSION_MAX == SUPPORTED_NUKE_VERSION_MIN:
-        return "Nuke {min}".format(min=SUPPORTED_NUKE_VERSION_MIN)
-    return "Nuke {min} to {max}".format(
-        min=SUPPORTED_NUKE_VERSION_MIN,
-        max=SUPPORTED_NUKE_VERSION_MAX,
-    )
+        return f"Nuke {SUPPORTED_NUKE_VERSION_MIN}"
+    return f"Nuke {SUPPORTED_NUKE_VERSION_MIN} to {SUPPORTED_NUKE_VERSION_MAX}"
 
 
 def _emit_refusal(detected: object) -> None:
-    line = "Unsupported Nuke version: {detected}. NSL v1 supports {range}.".format(
-        detected=detected,
-        range=_supported_range_label(),
+    line = (
+        f"Unsupported Nuke version: {detected}. "
+        f"NSL v1 supports {_supported_range_label()}."
     )
     # Routed through the logger's encoding-defensive writer: the refusal
     # prefix carries the ✗ glyph, which must not raise on ASCII stdout.
-    log._write_stdout("{prefix} {line}\n".format(prefix=log._FAILED_PREFIX, line=line))
+    log._write_stdout(f"{log._FAILED_PREFIX} {line}\n")
 
 
 def _read_nuke_version_major() -> Optional[int]:

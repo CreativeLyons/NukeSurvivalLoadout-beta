@@ -48,7 +48,7 @@ def _emit(line: str) -> None:
 
 
 def loading(plugin_name: str) -> None:
-    _emit("{prefix} {name}".format(prefix=_LOADING_PREFIX, name=plugin_name))
+    _emit(f"{_LOADING_PREFIX} {plugin_name}")
 
 
 def failed(plugin_name: str, category: str, detail: Optional[str] = None) -> None:
@@ -89,15 +89,10 @@ def traceback_block(tb: str) -> None:
 
 
 def warning(message: str) -> None:
-    _emit("{prefix} {message}".format(prefix=_WARNING_PREFIX, message=message))
+    _emit(f"{_WARNING_PREFIX} {message}")
 
 
 def critical_phase_failed(phase: str, exc: BaseException) -> None:
-    _emit("{prefix} [Phase: {phase}] {exc_type}: {exc}".format(
-        prefix=_FAILED_PREFIX,
-        phase=phase,
-        exc_type=type(exc).__name__,
-        exc=exc,
-    ))
+    _emit(f"{_FAILED_PREFIX} [Phase: {phase}] {type(exc).__name__}: {exc}")
     tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     _write_stdout(tb)
