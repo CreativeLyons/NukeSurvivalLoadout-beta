@@ -75,7 +75,9 @@ def write_atomic(path: PathLike, content: Union[str, bytes]) -> None:
     If the write to the temp file raises, the temp file is removed and the
     original target is left untouched. ``OSError`` from any step propagates
     (a temp file orphaned by a failed final replace is reclaimed by
-    ``sweep_orphan_tmp``).
+    ``sweep_orphan_tmp``, which the panel runs at bootstrap over
+    ``loadouts_dir`` and each loadout subfolder - see
+    ``NukeSurvivalLoadout.ui.registry_bootstrap.build_registry_for_panel``).
     """
     target = os.fspath(path)
     ensure_parent_dir(target)

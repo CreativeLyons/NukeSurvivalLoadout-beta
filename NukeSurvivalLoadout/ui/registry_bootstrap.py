@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
+from NukeSurvivalLoadout.atomic_io import sweep_orphan_tmp
 from NukeSurvivalLoadout.boot.dispatcher import (
     DispatcherState,
     read_dispatcher,
@@ -91,6 +92,17 @@ def build_registry_for_panel(
     """
     loadouts_dir = Path(loadouts_dir)
     loadouts_dir.mkdir(parents=True, exist_ok=True)
+
+    # Reclaim orphaned ``*.tmp`` siblings left by a write that crashed between
+    # the temp-write and the final ``os.replace`` (atomic_io.write_atomic).
+    # Bootstrap is the race-safe moment to do this: no NSL write is in flight
+    # during panel construction, so the only ``.tmp`` files present are dead
+    # leftovers - never a concurrent writer's in-flight temp. Doing it at the
+    # head of a write path instead would risk deleting a sibling writer's temp
+    # (the Issue 21 race). The sweep is non-recursive, so it runs once on
+    # ``loadouts_dir`` (orphan ``init.py.tmp`` from a dispatcher write) and
+    # once per direct subfolder (orphan from a per-loadout write).
+    _sweep_orphans(loadouts_dir)
 
     # Resolve the Global layer ONCE: the model feeds the read-only Global
     # row; the plugins dir feeds the registry so its rescan walks the same
@@ -198,6 +210,34 @@ def build_registry_for_panel(
 # ---------------------------------------------------------------------------
 # Stage helpers
 # ---------------------------------------------------------------------------
+
+
+def _sweep_orphans(loadouts_dir: Path) -> None:
+    """Reclaim orphaned ``*.tmp`` files under ``loadouts_dir`` (non-recursive).
+
+    ``sweep_orphan_tmp`` only scans direct children, so it is called once
+    on ``loadouts_dir`` itself and once per direct subfolder to cover both
+    the dispatcher ``init.py.tmp`` and per-loadout ``init.py.tmp`` orphan
+    sites. Every call is guarded: a locked or vanished leftover (a sweep
+    racing a folder delete, or a Windows share lock) must never block panel
+    bootstrap, so a failure is logged and skipped rather than raised.
+    """
+    try:
+        sweep_orphan_tmp(loadouts_dir)
+    except OSError as exc:
+        _log.debug("orphan tmp sweep skipped for %s: %s", loadouts_dir, exc)
+
+    try:
+        subfolders = [entry for entry in loadouts_dir.iterdir() if entry.is_dir()]
+    except OSError as exc:
+        _log.debug("could not enumerate loadout subfolders to sweep: %s", exc)
+        return
+
+    for subfolder in subfolders:
+        try:
+            sweep_orphan_tmp(subfolder)
+        except OSError as exc:
+            _log.debug("orphan tmp sweep skipped for %s: %s", subfolder, exc)
 
 
 def _load_dispatcher_state(
