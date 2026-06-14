@@ -159,6 +159,13 @@ def next_available_name(base: str, existing: Iterable[str]) -> str:
     keeps the caller's case (filesystems are case-preserving; so is
     NSL).
 
+    The collision suffix never pushes the result past the rules: the base
+    stem is truncated to reserve room for `_<n>` before the suffix is
+    appended, and every suffixed candidate is re-validated, so a returned
+    `_<n>` stem always satisfies `validate_filename` (length cap
+    included). The suffix budget is recomputed each iteration because the
+    digit count grows (`_9` -> `_10` costs one more character).
+
     Raises ValueError when `base` cannot produce a valid name (e.g.
     empty, disallowed characters). Callers should run `validate_filename`
     first when accepting user input.
@@ -173,8 +180,15 @@ def next_available_name(base: str, existing: Iterable[str]) -> str:
         return candidate
     suffix = 2
     while True:
-        candidate = f"{stem}_{suffix}"
-        if candidate.casefold() not in taken:
+        suffix_part = f"_{suffix}"
+        # Reserve room for the suffix so the joined stem stays within the
+        # length cap; recomputed each pass since the digit count grows.
+        budget = LOADOUT_FILENAME_MAX_STEM_LEN - len(suffix_part)
+        candidate = f"{stem[:budget]}{suffix_part}"
+        if (
+            candidate.casefold() not in taken
+            and validate_filename(candidate).is_valid
+        ):
             return candidate
         suffix += 1
 
