@@ -14,6 +14,7 @@ OSError is propagated unchanged; callers wrap.
 from __future__ import annotations
 
 import os
+import tempfile
 import time
 from typing import Union
 
@@ -67,20 +68,22 @@ def write_atomic(path: PathLike, content: Union[str, bytes]) -> None:
 
     Steps:
       1. ``ensure_parent_dir(path)`` so callers get lazy folder creation.
-      2. Write the full payload to a sibling ``<path>.tmp``.
+      2. Write the full payload to a unique sibling temp file created by
+         ``tempfile.mkstemp`` (``<basename>.<random>.tmp`` in the target's
+         directory). A unique name per writer means two Nuke sessions
+         writing the same target never share a temp path, so one cannot
+         promote or delete another's in-flight bytes.
       3. ``os.replace`` the temp file over the target - same-dir, atomic
          on POSIX and NTFS (with a bounded share-lock retry on Windows,
          see ``_replace_with_retry``).
 
-    If the write to the temp file raises, the temp file is removed and the
-    original target is left untouched. ``OSError`` from any step propagates
-    (a temp file orphaned by a failed final replace is reclaimed by
-    ``sweep_orphan_tmp``).
+    If the write to the temp file raises, that writer's own temp file is
+    removed and the original target is left untouched. ``OSError`` from any
+    step propagates (a temp file orphaned by a failed final replace is
+    reclaimed by ``sweep_orphan_tmp``, which matches the ``.tmp`` suffix).
     """
     target = os.fspath(path)
     ensure_parent_dir(target)
-
-    tmp = target + ".tmp"
 
     if isinstance(content, bytes):
         mode = "wb"
@@ -96,8 +99,20 @@ def write_atomic(path: PathLike, content: Union[str, bytes]) -> None:
         # source as UTF-8, so the write side must guarantee UTF-8.
         open_kwargs = {"encoding": "utf-8", "newline": "\n"}
 
+    # A unique per-writer temp in the target's own directory. Keeping the
+    # ``.tmp`` suffix preserves ``sweep_orphan_tmp`` reclamation; the
+    # ``<basename>.`` prefix keeps orphans recognizable next to their target.
+    parent = os.path.dirname(target)
+    fd, tmp = tempfile.mkstemp(
+        dir=parent if parent else ".",
+        prefix=os.path.basename(target) + ".",
+        suffix=".tmp",
+    )
+
     try:
-        with open(tmp, mode, **open_kwargs) as fh:
+        # ``os.fdopen`` takes ownership of ``fd``; closing ``fh`` (on exit
+        # from the ``with`` block) closes the fd exactly once.
+        with os.fdopen(fd, mode, **open_kwargs) as fh:
             fh.write(payload)
             fh.flush()
             os.fsync(fh.fileno())
