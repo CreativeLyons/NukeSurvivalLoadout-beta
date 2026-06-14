@@ -9,7 +9,7 @@ top-toolbar's Undo / Redo buttons bound to the **active** Loadout's
 :class:`NukeSurvivalLoadout.domain.undo_stack.UndoStack`. The actual undo / redo
 *invocations* are routed by :mod:`NukeSurvivalLoadout.ui.wiring.events`, which
 resolves the active stack dynamically from
-``registry.settings.last_active_loadout`` at signal time. Because that
+``registry.state.active`` at signal time. Because that
 resolution is dynamic, the runtime "swap" of which stack the buttons act
 on happens automatically when the active Loadout changes.
 
@@ -72,7 +72,7 @@ def _is_global(stem: str) -> bool:
     """Return True when ``stem`` refers to the reserved Global Loadout.
 
     Empty string is treated as Global because :mod:`NukeSurvivalLoadout.domain.loadout_ops`
-    encodes "Global active" as ``last_active_loadout == ""`` or
+    encodes "Global active" as ``registry.state.active == ""`` or
     ``RESERVED_LOADOUT_STEM``.
     """
     return not stem or stem == RESERVED_LOADOUT_STEM
@@ -142,7 +142,7 @@ def wire_undo_switch(panel) -> None:
     * The actual undo / redo *invocations* run through the
       ``_on_undo`` / ``_on_redo`` slots in the events wiring layer,
       which resolve the active stack dynamically from
-      ``registry.settings.last_active_loadout``. We do not duplicate
+      ``registry.state.active``. We do not duplicate
       that wiring.
 
     Args:
@@ -160,7 +160,7 @@ def wire_undo_switch(panel) -> None:
     strip.loadout_selected.connect(_on_loadout_selected)
 
     # Initial sync: bind toolbar availability to whatever Loadout is
-    # currently active in settings. This handles the first paint of the
+    # currently active per ``registry.state.active``. This handles the first paint of the
     # panel as well as a re-wire after a programmatic state restore.
     # Tolerate a missing registry: the toolbar starts disabled by
     # default and re-syncs on the first switch.
