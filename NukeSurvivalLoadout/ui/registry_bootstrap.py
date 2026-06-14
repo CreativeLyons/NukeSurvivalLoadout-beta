@@ -7,11 +7,11 @@ to populate its registry from:
   defaults when the file is missing). The dispatcher holds the panic
   flag and the active-loadout pointer.
 * The resolved Global layer: the chain head ``<repo>/Global/init.py``
-  names the Global plugins dir (the boot session record carries the
-  head's actual resolved value; a static head parse is the offline
-  fallback), the optional ``Global/Global_Loadout/init.py`` supplies
-  per-plugin directives (parsed, never executed in this role), and a
-  scan of the plugins dir supplies the default-on names.
+  names the Global plugins and loadout dirs (the boot session record
+  carries the head's actual resolved values; a static head parse is the
+  offline fallback for each), the optional ``Global/Global_Loadout/init.py``
+  supplies per-plugin directives (parsed, never executed in this role),
+  and a scan of the plugins dir supplies the default-on names.
 * The active user Loadout file from disk (or ``None`` when Global
   is the active pointer).
 
@@ -282,6 +282,20 @@ def _recorded_global_dir() -> Optional[str]:
         return None
 
 
+def _recorded_global_loadout_dir() -> Optional[str]:
+    """The Global loadout dir the boot loader recorded, when inside Nuke."""
+    try:
+        from NukeSurvivalLoadout.boot.session_record import (
+            recorded_global_loadout_dir,
+        )
+    except Exception:  # noqa: BLE001 - no nuke module outside Nuke
+        return None
+    try:
+        return recorded_global_loadout_dir()
+    except Exception:  # noqa: BLE001 - record read must never block boot
+        return None
+
+
 def _load_global(nsl_root: Path) -> _GlobalLayer:
     """Resolve the Global layer: head declarations + loadout parse + scan.
 
@@ -298,7 +312,8 @@ def _load_global(nsl_root: Path) -> _GlobalLayer:
 
     config = read_head_config(str(head_path))
     plugins_dir = _recorded_global_dir() or config.plugins_dir
-    loadout_init = Path(config.loadout_dir) / "init.py"
+    loadout_dir = _recorded_global_loadout_dir() or config.loadout_dir
+    loadout_init = Path(loadout_dir) / "init.py"
     has_loadout_copy = loadout_init.is_file()
 
     error: Optional[str] = None

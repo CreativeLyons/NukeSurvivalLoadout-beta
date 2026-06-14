@@ -31,6 +31,24 @@ def recorded_global_dir() -> "str | None":
     return recorded if isinstance(recorded, str) else None
 
 
+def record_global_loadout_dir(path: str) -> None:
+    """Record the resolved Global loadout dir for this session.
+
+    Stamped by ``boot.global_loader.nsl_load_global`` at boot so the
+    panel reads the head's actual resolved value instead of re-deriving
+    it (the head is Python; a TD may compute the path dynamically). The
+    panel's read-only Global model and its ``has_loadout_copy`` case-A/B
+    switch then match what boot actually loaded.
+    """
+    nuke._nsl_global_loadout_dir = os.path.normpath(path)
+
+
+def recorded_global_loadout_dir() -> "str | None":
+    """The Global loadout dir recorded at boot, or ``None`` when absent."""
+    recorded = getattr(nuke, "_nsl_global_loadout_dir", None)
+    return recorded if isinstance(recorded, str) else None
+
+
 def record_loaded(name: str, path: str, gui: bool = False) -> None:
     """Append one plugin-load record to ``nuke._nsl_loaded_session``.
 
