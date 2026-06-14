@@ -45,7 +45,7 @@ from NukeSurvivalLoadout.constants import (
 )
 from NukeSurvivalLoadout.boot.dispatcher import DispatcherState
 from NukeSurvivalLoadout.data.loadout_file import LoadoutFile, PluginEntry
-from NukeSurvivalLoadout.domain import loadout_ops
+from NukeSurvivalLoadout.domain import folder_ops, loadout_ops
 from NukeSurvivalLoadout.domain.scanner import Plugin, scan_folder
 from NukeSurvivalLoadout.paths import canon_for_compare
 from NukeSurvivalLoadout.domain.undo_stack import UndoStackRegistry
@@ -1946,14 +1946,12 @@ def _glob_from_qt_filter(qt_filter: str) -> Optional[str]:
 def _canonical_folder_var(index: int) -> str:
     """Positional ``plugins_X`` var for the folder at ``index``.
 
-    0->A ... 25->Z, 26->AA, 27->AB ... - same ordering as
-    ``folder_ops._next_folder_var`` so the dispatcher's canonical var
-    names line up with what add-folder assigned.
+    Thin alias for :func:`folder_ops.canonical_folder_var` - the single
+    source of truth for the A-Z then AA-ZZ ordering. Kept so the
+    dispatcher's canonical var names line up with what add-folder
+    assigned and the per-loadout ``init.py`` renderer emits.
     """
-    if index < 26:
-        return f"plugins_{chr(ord('A') + index)}"
-    hi, lo = divmod(index - 26, 26)
-    return f"plugins_{chr(ord('A') + hi)}{chr(ord('A') + lo)}"
+    return folder_ops.canonical_folder_var(index)
 
 
 def _clone_loadout(model: Optional[LoadoutFile]) -> Optional[LoadoutFile]:

@@ -58,6 +58,7 @@ from NukeSurvivalLoadout.constants import (
 
 
 __all__ = [
+    "canonical_folder_var",
     "HealthState",
     "FolderHealth",
     "FolderValidationError",
@@ -236,25 +237,50 @@ class RemoveResult:
     disappeared: Tuple[str, ...] = ()
 
 
+#: Total positional ``plugins_X`` slots: A-Z (26) then AA-ZZ (676).
+_MAX_FOLDER_VAR_INDEX = 26 + 26 * 26 - 1  # 701 (inclusive)
+
+
+def canonical_folder_var(index: int) -> str:
+    """Positional ``plugins_X`` var name for the folder at ``index``.
+
+    Single letters A-Z cover ``0..25``; double letters AA-ZZ cover
+    ``26..701`` (``26->AA``, ``27->AB`` ...). This is the one canonical
+    index->var mapping: the dispatcher's per-position vars and the
+    per-loadout ``init.py`` folder vars must agree, so both derive from
+    here rather than open-coding ``chr(ord('A') + index)`` (which yields
+    ``plugins_[`` at index 26 - an invalid identifier that turns the
+    rendered ``init.py`` into a ``SyntaxError``).
+
+    Raises:
+        ``ValueError`` - ``index`` is negative or exceeds the AA-ZZ
+        range. Better a loud failure than emitting a garbage var.
+    """
+    if index < 0 or index > _MAX_FOLDER_VAR_INDEX:
+        raise ValueError(
+            f"folder_ops: folder index {index} out of range "
+            f"(0..{_MAX_FOLDER_VAR_INDEX}; A-Z then AA-ZZ)"
+        )
+    if index < 26:
+        return f"plugins_{chr(ord('A') + index)}"
+    hi, lo = divmod(index - 26, 26)
+    return f"plugins_{chr(ord('A') + hi)}{chr(ord('A') + lo)}"
+
+
 def _next_folder_var(existing_vars: Iterable[str]) -> str:
     """Return the next unused ``plugins_X`` var name (A, B, C, ...).
 
-    Walks the alphabet then falls back to ``plugins_AA``, ``plugins_AB``...
-    Practically the user will never hit double letters; the recursion is a
-    belt for the rare site that bolts on dozens of source folders.
+    Walks the canonical A-Z then AA-ZZ ordering (see
+    :func:`canonical_folder_var`) and returns the first slot not already
+    taken. Practically the user will never hit double letters; the
+    fallback is a belt for the rare site that bolts on dozens of source
+    folders.
     """
     taken = set(existing_vars)
-    # Single letters A-Z.
-    for code in range(ord("A"), ord("Z") + 1):
-        candidate = f"plugins_{chr(code)}"
+    for index in range(_MAX_FOLDER_VAR_INDEX + 1):
+        candidate = canonical_folder_var(index)
         if candidate not in taken:
             return candidate
-    # Fallback - double letters AA, AB, ...
-    for hi in range(ord("A"), ord("Z") + 1):
-        for lo in range(ord("A"), ord("Z") + 1):
-            candidate = f"plugins_{chr(hi)}{chr(lo)}"
-            if candidate not in taken:
-                return candidate
     raise ValueError("folder_ops: exhausted plugins_XX var name space")
 
 
