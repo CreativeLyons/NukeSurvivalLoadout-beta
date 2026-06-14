@@ -129,10 +129,19 @@ def wire_degraded(panel: Any) -> None:
 
     Behaviour:
 
-    * Reads :func:`NukeSurvivalLoadout.boot.self_recovery.boot_failed`. If the boot was
-      clean (``False``), returns immediately - degraded mode is purely a
-      failure-time UI, the normal panel is untouched.
-    * If the boot was critically failed (``True``):
+    * Enters degraded mode when EITHER the boot sequence recorded a
+      critical failure (:func:`NukeSurvivalLoadout.boot.self_recovery.boot_failed`)
+      OR the panel carries a non-empty ``_bootstrap_error`` string set by
+      :func:`NukeSurvivalLoadout.ui.registry_bootstrap.build_registry_for_panel`
+      (e.g. a MALFORMED, unparseable dispatcher). A malformed dispatcher
+      must not be treated as empty: degraded read-only mode disables the
+      write surfaces so the next normal write cannot overwrite the
+      damaged-but-recoverable file. (``write_dispatcher`` additionally
+      keeps a ``.bak`` side-copy before any rewrite.)
+    * If neither condition holds (clean boot, no bootstrap error), returns
+      immediately - degraded mode is purely a failure-time UI and the
+      normal panel is untouched.
+    * When degraded:
 
       - Injects a :class:`DegradedBanner` as the very first widget in the
         panel's outer ``QVBoxLayout`` (above the top toolbar and the
@@ -161,7 +170,13 @@ def wire_degraded(panel: Any) -> None:
     # mid-build (the helper is only meaningful once the boot sequence has run).
     from NukeSurvivalLoadout.boot import self_recovery
 
-    if not self_recovery.boot_failed():
+    # A bootstrap-level error (malformed dispatcher, unreadable Global,
+    # etc.) is a degrade trigger even when the boot sequence itself did
+    # not record a critical failure - the panel must enter read-only mode
+    # rather than letting the next write overwrite a damaged file.
+    bootstrap_error = getattr(panel, "_bootstrap_error", None)
+
+    if not self_recovery.boot_failed() and not bootstrap_error:
         return
 
     _apply_degraded_mode(panel)
@@ -249,6 +264,7 @@ def _fill_summary_tab(panel: Any) -> None:
     phase = self_recovery.failed_phase() or "unknown phase"
     exc = self_recovery.failure_exception()
     exc_text = "" if exc is None else f"{type(exc).__name__}: {exc}"
+    bootstrap_error = getattr(panel, "_bootstrap_error", None)
 
     body_lines = [
         "<h3 style='color:#c8261c;'>NSL did not complete startup</h3>",
@@ -259,6 +275,17 @@ def _fill_summary_tab(panel: Any) -> None:
             "<p><b>Exception:</b></p>"
             "<pre style='font-family:Menlo,Monaco,Consolas,monospace;'>"
             f"{_html_escape(exc_text)}"
+            "</pre>"
+        )
+    # Bootstrap-level detail (malformed dispatcher path + parse note,
+    # unreadable Global, etc.). Distinct channel from the boot-sequence
+    # exception above; surfaced so a hand-edit typo on the user-editable
+    # dispatcher tells the user the exact file and that it was backed up.
+    if bootstrap_error:
+        body_lines.append(
+            "<p><b>Bootstrap error:</b></p>"
+            "<pre style='font-family:Menlo,Monaco,Consolas,monospace;'>"
+            f"{_html_escape(str(bootstrap_error))}"
             "</pre>"
         )
     body_lines.append(
