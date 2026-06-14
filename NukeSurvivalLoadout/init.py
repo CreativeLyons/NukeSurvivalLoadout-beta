@@ -61,8 +61,7 @@ def _global_dir() -> str:
 
 
 def _run() -> None:
-    gate = check_nuke_version()
-    if not getattr(gate, "accepted", bool(gate)):
+    if not check_nuke_version():
         return
 
     loadouts_dir = _loadouts_dir()

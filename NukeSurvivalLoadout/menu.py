@@ -233,8 +233,7 @@ def _open_loadout_panel() -> None:
 
 
 def _register() -> None:
-    gate = check_nuke_version()
-    if not getattr(gate, "accepted", bool(gate)):
+    if not check_nuke_version():
         return
 
     # Single command in Nuke's Edit menu (callable form, Nuke 13+; no
