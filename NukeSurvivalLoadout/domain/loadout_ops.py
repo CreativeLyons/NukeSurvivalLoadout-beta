@@ -43,6 +43,7 @@ loadout folder under ``<loadouts_dir>/``.
 
 from __future__ import annotations
 
+import itertools
 import os
 import shutil
 import stat
@@ -171,12 +172,22 @@ def read_dispatcher_state(loadouts_dir: PathLike) -> DispatcherState:
 
 
 def _existing_loadout_names(loadouts_dir: Path) -> list[str]:
-    """Folders directly under ``loadouts_dir`` that contain an ``init.py``."""
+    """Folders directly under ``loadouts_dir`` that contain an ``init.py``.
+
+    Dot- and underscore-prefixed folders are skipped: validated loadout
+    names can never start with ``.`` or ``_`` (see ``filename_rules``), so
+    such folders are never real loadouts. This keeps the in-flight delete
+    quarantine (``.<name>.nsl-trash-...``, which still holds an ``init.py``)
+    out of both the panel enumeration and the delete fallback picker, so a
+    quarantined folder can never be chosen as the new active pointer.
+    """
     if not loadouts_dir.is_dir():
         return []
     names: list[str] = []
     for entry in loadouts_dir.iterdir():
         if not entry.is_dir():
+            continue
+        if entry.name.startswith((".", "_")):
             continue
         if (entry / LOADOUT_INIT_FILENAME).is_file():
             names.append(entry.name)
@@ -241,6 +252,37 @@ def _rmtree_force(path: Path) -> None:
 def _write_dispatcher(loadouts_dir: Path, state: DispatcherState) -> None:
     """Atomic write of the dispatcher init.py for ``loadouts_dir``."""
     write_dispatcher(str(dispatcher_path(loadouts_dir)), state)
+
+
+# Process-lifetime counter so two quarantines minted in the same process
+# (same PID, same clock tick) still differ.
+_quarantine_seq = itertools.count()
+
+
+def _quarantine_folder(folder: Path) -> Path:
+    """Return a collision-proof quarantine destination for ``folder``.
+
+    Used by :func:`delete` to *move* the target out of the way before the
+    dispatcher pointer is rewritten, so the original is recoverable if that
+    write fails. The name is dot-prefixed (kept out of the panel's loadout
+    enumeration, which only lists folders holding an ``init.py`` under a
+    validated name) and carries the PID plus a per-process counter:
+
+        ``.<name>.nsl-trash-<pid>-<seq>``
+
+    A validated loadout name can never contain ``.nsl-trash-``, and the
+    ``<pid>-<seq>`` suffix is unique within and across concurrent processes,
+    so the quarantine destination cannot collide with a real loadout or with
+    another in-flight delete. The loop bumps the counter on the vanishingly
+    unlikely event a stale quarantine with the same name already exists.
+    """
+    parent = folder.parent
+    while True:
+        candidate = parent / (
+            f".{folder.name}.nsl-trash-{os.getpid()}-{next(_quarantine_seq)}"
+        )
+        if not candidate.exists():
+            return candidate
 
 
 def _state_with_active(state: DispatcherState, active: str) -> DispatcherState:
@@ -309,7 +351,22 @@ def create(
 
     write_loadout(str(new_folder / LOADOUT_INIT_FILENAME), model)
     new_state = _state_with_active(state, new_name)
-    _write_dispatcher(target_dir, new_state)
+    # The new folder already exists, so a failed pointer write needs no
+    # compensation - the old active loadout still resolves. Surface a
+    # structured refusal rather than letting OSError raise through the Qt
+    # signal layer as a traceback.
+    try:
+        _write_dispatcher(target_dir, new_state)
+    except OSError as exc:
+        return OpResult(
+            path=new_folder,
+            model=model,
+            state=state,
+            blocked=Blocked(
+                code=BlockedReason.FS_ERROR,
+                detail=f"Created {new_name} but could not update active pointer: {exc}",
+            ),
+        )
     return OpResult(path=new_folder, model=model, state=new_state)
 
 
@@ -363,7 +420,21 @@ def save_as(
     )
     write_loadout(str(folder / LOADOUT_INIT_FILENAME), saved_model)
     new_state = _state_with_active(state, final_name)
-    _write_dispatcher(target_dir, new_state)
+    # New folder already on disk; a failed pointer write leaves the old
+    # active loadout resolvable, so no compensation - just a structured
+    # refusal instead of an unguarded raise.
+    try:
+        _write_dispatcher(target_dir, new_state)
+    except OSError as exc:
+        return OpResult(
+            path=folder,
+            model=saved_model,
+            state=state,
+            blocked=Blocked(
+                code=BlockedReason.FS_ERROR,
+                detail=f"Saved {final_name} but could not update active pointer: {exc}",
+            ),
+        )
     return OpResult(path=folder, model=saved_model, state=new_state)
 
 
@@ -412,10 +483,49 @@ def rename(
             ),
         )
 
+    # Transactional: the folder rename is already committed above. If the
+    # renamed loadout was active we must advance the dispatcher pointer too.
+    # Should that write fail, the folder change would otherwise persist with
+    # ACTIVE_LOADOUT still naming the (now gone) old folder - the active
+    # plugins would silently stop loading at next launch. So on a failed
+    # dispatcher write we rename the folder BACK and report FS_ERROR.
     new_state = state
     if state.active == current_name:
         new_state = _state_with_active(state, final_name)
-        _write_dispatcher(target_dir, new_state)
+        try:
+            _write_dispatcher(target_dir, new_state)
+        except OSError as exc:
+            try:
+                os.rename(new_folder, src_folder)
+            except OSError:
+                # Compensation itself failed - leave the folder under the
+                # new name rather than risk a second partial move. The
+                # detail below records both the original and rollback fault
+                # so the panel surfaces a refusal, not a traceback.
+                return OpResult(
+                    path=None,
+                    model=None,
+                    state=state,
+                    blocked=Blocked(
+                        code=BlockedReason.FS_ERROR,
+                        detail=(
+                            f"Could not update active pointer after renaming "
+                            f"{current_name}; rollback also failed: {exc}"
+                        ),
+                    ),
+                )
+            return OpResult(
+                path=None,
+                model=None,
+                state=state,
+                blocked=Blocked(
+                    code=BlockedReason.FS_ERROR,
+                    detail=(
+                        f"Could not update active pointer after renaming "
+                        f"{current_name}; rolled back: {exc}"
+                    ),
+                ),
+            )
 
     try:
         model: Optional[LoadoutModel] = read_loadout(
@@ -453,12 +563,19 @@ def delete(
             ),
         )
 
+    # Transactional delete. A plain rmtree-then-dispatcher-write would, on a
+    # failed dispatcher write, leave ACTIVE_LOADOUT pointing at a folder that
+    # no longer exists - the active plugins silently stop loading at next
+    # launch with nothing to recover. Instead we MOVE the folder to a
+    # recoverable quarantine name first, write the fallback pointer, and only
+    # then remove the quarantine. If the dispatcher write fails we move the
+    # folder BACK and report FS_ERROR; nothing is lost.
     try:
-        _rmtree_force(target_folder)
+        quarantine = _quarantine_folder(target_folder)
+        os.rename(target_folder, quarantine)
     except OSError as exc:
-        # Open handles / permission walls (routine on Windows). A
-        # partial delete may have occurred; the pointer is untouched and
-        # the survivors stay listable.
+        # Open handles / permission walls (routine on Windows). The folder is
+        # untouched, the pointer is untouched, the survivors stay listable.
         return OpResult(
             path=None,
             model=None,
@@ -473,7 +590,51 @@ def delete(
     if state.active == name:
         fallback = _pick_fallback_active(target_dir, name)
         new_state = _state_with_active(state, fallback)
-        _write_dispatcher(target_dir, new_state)
+        try:
+            _write_dispatcher(target_dir, new_state)
+        except OSError as exc:
+            # Pointer write failed - restore the quarantined folder so the
+            # active loadout still resolves, and surface a refusal.
+            try:
+                os.rename(quarantine, target_folder)
+            except OSError:
+                # Restore failed; leave the folder quarantined rather than
+                # risk a second partial move. It is recoverable on disk under
+                # the .nsl-trash- name.
+                return OpResult(
+                    path=None,
+                    model=None,
+                    state=state,
+                    blocked=Blocked(
+                        code=BlockedReason.FS_ERROR,
+                        detail=(
+                            f"Could not update active pointer after deleting "
+                            f"{name}; folder quarantined as {quarantine.name}: "
+                            f"{exc}"
+                        ),
+                    ),
+                )
+            return OpResult(
+                path=None,
+                model=None,
+                state=state,
+                blocked=Blocked(
+                    code=BlockedReason.FS_ERROR,
+                    detail=(
+                        f"Could not update active pointer after deleting "
+                        f"{name}; restored: {exc}"
+                    ),
+                ),
+            )
+
+    # Pointer is consistent (or never needed updating). Now drop the
+    # quarantined folder for real. A failure here leaves recoverable trash but
+    # the dispatcher is already correct, so the op still succeeded logically;
+    # best-effort cleanup, do not fail the op over leftover trash.
+    try:
+        _rmtree_force(quarantine)
+    except OSError:
+        pass
 
     return OpResult(path=target_folder, model=None, state=new_state)
 
@@ -521,15 +682,29 @@ def duplicate(
             ),
         )
 
-    new_state = _state_with_active(state, final_name)
-    _write_dispatcher(target_dir, new_state)
-
     try:
         model: Optional[LoadoutModel] = read_loadout(
             str(new_folder / LOADOUT_INIT_FILENAME)
         )
     except (FileNotFoundError, SyntaxError):
         model = None
+
+    new_state = _state_with_active(state, final_name)
+    # Copy already on disk; a failed pointer write leaves the old active
+    # loadout resolvable, so no compensation - structured refusal instead of
+    # an unguarded raise.
+    try:
+        _write_dispatcher(target_dir, new_state)
+    except OSError as exc:
+        return OpResult(
+            path=new_folder,
+            model=model,
+            state=state,
+            blocked=Blocked(
+                code=BlockedReason.FS_ERROR,
+                detail=f"Duplicated to {final_name} but could not update active pointer: {exc}",
+            ),
+        )
 
     return OpResult(path=new_folder, model=model, state=new_state)
 
