@@ -52,6 +52,7 @@ __all__ = [
     "render",
     "sync_folders",
     "sync_folders_to_loadouts",
+    "SyncFoldersResult",
 ]
 
 
@@ -769,34 +770,140 @@ def sync_folders(
     )
 
 
-def sync_folders_to_loadouts(loadouts_dir, canonical: list[FolderDecl]) -> list[str]:
+@dataclass
+class SyncFoldersResult:
+    """Outcome of a :func:`sync_folders_to_loadouts` fan-out.
+
+    * ``synced`` - stems whose ``init.py`` was rewritten with the new
+      canonical folder set.
+    * ``skipped`` - ``(stem, reason)`` pairs for loadouts that could not
+      be staged (unreadable / malformed source, or a rendered payload
+      that failed to compile). These are NOT silently dropped: the caller
+      surfaces them so a malformed loadout is visible rather than quietly
+      left on a stale folder set.
+    * ``failed`` - stems whose write raised mid-commit. When this is
+      non-empty the fan-out was rolled back (every already-written file
+      restored from its pre-write bytes) and the underlying ``OSError`` is
+      re-raised, so callers never observe a half-applied result.
+    """
+
+    synced: list[str] = field(default_factory=list)
+    skipped: list[tuple[str, str]] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+
+
+def sync_folders_to_loadouts(
+    loadouts_dir, canonical: list[FolderDecl]
+) -> SyncFoldersResult:
     """Rewrite every loadout ``init.py`` so its folder decls match ``canonical``.
 
     Walks ``<loadouts_dir>/*/init.py`` (each subdir is one loadout), applies
     :func:`sync_folders`, and writes the result back. The dispatcher itself
     (``<loadouts_dir>/init.py``) is never a subdir entry, so it's skipped
-    naturally. Unreadable / malformed loadout files are skipped rather than
-    raising - one bad loadout must not block syncing the others.
+    naturally.
 
-    Returns the list of loadout stems that were synced.
+    Two phases keep the fan-out transactional:
+
+      1. **Stage** - read, sync, render, and ``compile()``-validate every
+         loadout *without writing*. Unreadable / malformed files (and the
+         defensive case of a rendered payload that won't compile) are
+         recorded in ``result.skipped`` rather than raising, so one bad
+         loadout never blocks syncing the others - but they are surfaced,
+         not silently dropped.
+      2. **Commit** - only once every payload is known-renderable, write
+         each staged file, capturing its pre-write bytes first. If any
+         write raises ``OSError``, every already-written file is restored
+         from its saved bytes, the failing stem is recorded in
+         ``result.failed``, and the error is re-raised. A mid-stream write
+         failure therefore leaves the loadouts exactly as they were, not a
+         half-applied mix of new and old folder sets.
+
+    Returns a :class:`SyncFoldersResult` carrying the synced / skipped /
+    failed stems. Callers must surface ``skipped`` (malformed loadouts) and
+    handle the re-raised ``OSError`` on rollback.
     """
     import os
 
     loadouts_dir = str(loadouts_dir)
-    synced: list[str] = []
+    result = SyncFoldersResult()
     try:
         names = sorted(os.listdir(loadouts_dir))
     except OSError:
-        return synced
+        return result
 
+    # Phase 1: stage. Render + validate every payload in memory; nothing is
+    # written until the whole set is known-good.
+    staged: list[tuple[str, str, str]] = []  # (name, init_path, new_text)
     for name in names:
         init_path = os.path.join(loadouts_dir, name, "init.py")
         if not os.path.isfile(init_path):
             continue
         try:
             model = read_loadout(init_path)
-        except (OSError, SyntaxError):
+        except (OSError, SyntaxError) as exc:
+            result.skipped.append((name, f"unreadable or malformed: {exc}"))
             continue
-        write_loadout(init_path, sync_folders(model, canonical))
-        synced.append(name)
-    return synced
+        new_text = render(sync_folders(model, canonical))
+        try:
+            # Defensive: a rendered loadout is Python source Nuke imports at
+            # boot. Compile here so a payload that would crash boot is caught
+            # before it is ever written, not after.
+            compile(new_text, init_path, "exec")
+        except SyntaxError as exc:
+            result.skipped.append((name, f"rendered payload won't compile: {exc}"))
+            continue
+        staged.append((name, init_path, new_text))
+
+    # Phase 2: commit with rollback. Save each target's original bytes so a
+    # mid-stream OSError can be undone, then write. On failure, restore every
+    # file written so far and re-raise - the fan-out is all-or-nothing.
+    written: list[tuple[str, bytes | None]] = []  # (init_path, original_bytes)
+    for name, init_path, new_text in staged:
+        try:
+            original = _read_bytes_or_none(init_path)
+            atomic_io.write_atomic(init_path, new_text)
+        except OSError:
+            result.failed.append(name)
+            _rollback_writes(written)
+            raise
+        written.append((init_path, original))
+        result.synced.append(name)
+
+    return result
+
+
+def _read_bytes_or_none(path: str) -> "bytes | None":
+    """Return the file's bytes, or ``None`` if it does not yet exist.
+
+    ``None`` distinguishes "no prior file" (a freshly-created loadout - roll
+    back by removing it) from "existing file" (roll back by restoring bytes).
+    A read error other than absence propagates so we never claim a clean
+    snapshot we do not actually hold.
+    """
+    import os
+
+    if not os.path.exists(path):
+        return None
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def _rollback_writes(written: list[tuple[str, "bytes | None"]]) -> None:
+    """Restore each ``(path, original_bytes)`` to its pre-write state.
+
+    ``original_bytes is None`` means the file did not exist before the
+    fan-out, so rollback removes it. Restores run in reverse write order.
+    Best-effort: a failure to undo one file must not mask the original
+    write error, so per-file errors are swallowed here.
+    """
+    import os
+
+    for path, original in reversed(written):
+        try:
+            if original is None:
+                if os.path.exists(path):
+                    os.remove(path)
+            else:
+                atomic_io.write_atomic(path, original)
+        except OSError:
+            continue
