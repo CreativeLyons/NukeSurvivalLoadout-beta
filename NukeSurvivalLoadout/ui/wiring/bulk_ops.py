@@ -35,7 +35,7 @@ Key behavior:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import List, Optional
 
 from NukeSurvivalLoadout.boot.dispatcher import DispatcherState
 from NukeSurvivalLoadout.boot.loadout_file import (
@@ -44,7 +44,12 @@ from NukeSurvivalLoadout.boot.loadout_file import (
     PluginEntry as ChainPluginEntry,
     read_loadout as read_chain_loadout,
 )
-from NukeSurvivalLoadout.constants import DEFAULT_CUSTOM_LOADOUT_STEM, RESERVED_LOADOUT_STEM
+from NukeSurvivalLoadout.constants import (
+    DEFAULT_CUSTOM_LOADOUT_STEM,
+    GLOBAL_PLUGINS_VAR_NAME,
+    GLOBAL_SOURCE_MARKER,
+    RESERVED_LOADOUT_STEM,
+)
 from NukeSurvivalLoadout.data.loadout_file import LoadoutFile, PluginEntry
 from NukeSurvivalLoadout.domain import loadout_ops
 from NukeSurvivalLoadout.domain.undo_stack import UndoStack, UndoStackRegistry
@@ -63,30 +68,98 @@ def _chain_loadout_init_path(loadouts_dir: Path, stem: str) -> Path:
     return Path(loadouts_dir) / stem / "init.py"
 
 
+class _UnroutablePlugin(Exception):
+    """A plugin's source folder cannot be mapped to a configured folder var.
+
+    Raised inside :func:`_build_chain_from_legacy` when a brand-new
+    exception (no on-disk line to inherit a ``folder_var`` from) belongs to
+    a plugin whose ``source`` resolves to neither a user folder nor Global.
+    Routing it would write the directive against the wrong path - it would
+    miss at boot and the correct folder's sweep would load the plugin
+    default-on. The caller converts this into a structured ``Blocked``
+    rather than silently misrouting.
+    """
+
+    def __init__(self, plugin_name: str) -> None:
+        super().__init__(plugin_name)
+        self.plugin_name = plugin_name
+
+
+def _build_routing_map(registry) -> dict:
+    """Map each discovered plugin Name to the folder var it belongs in.
+
+    Mirrors the source -> folder-var routing in
+    :func:`NukeSurvivalLoadout.ui.wiring.events._build_chain_model`: user
+    folders get ``plugins_A`` / ``plugins_B`` (by configured order), and
+    Global-source plugins (``source == GLOBAL_SOURCE_MARKER``, plus the
+    denormalised ``global_plugin_names`` set) route under
+    ``GLOBAL_PLUGINS_VAR_NAME``. Plugins whose source matches no configured
+    user folder are simply absent from the map - the caller treats that as
+    unroutable.
+    """
+    user_dirs = list(getattr(registry, "user_plugin_dirs", []) or [])
+    var_for_path = {
+        path: f"plugins_{chr(ord('A') + idx)}"
+        for idx, path in enumerate(user_dirs)
+    }
+    discovered = getattr(registry, "discovered_plugins", {}) or {}
+    routing: dict[str, str] = {}
+    for name, plugin in discovered.items():
+        source = getattr(plugin, "source", None)
+        if source == GLOBAL_SOURCE_MARKER:
+            routing[name] = GLOBAL_PLUGINS_VAR_NAME
+            continue
+        var = var_for_path.get(source)
+        if var is not None:
+            routing[name] = var
+    # Belt-and-suspenders: anything the Global model knows about routes to
+    # the Global var even if the scan didn't tag it (e.g. a Global plugin
+    # whose folder wasn't re-walked this session).
+    for name in (getattr(registry, "global_plugin_names", ()) or ()):
+        routing.setdefault(name, GLOBAL_PLUGINS_VAR_NAME)
+    return routing
+
+
 def _build_chain_from_legacy(
     loadouts_dir: Path,
     stem: str,
     legacy_model: LoadoutFile,
-    user_plugin_dirs: Iterable[str],
+    registry,
 ) -> LoadoutModel:
     """Bridge a legacy LoadoutFile back to a chain LoadoutModel for save.
 
     Reads the existing on-disk init.py (if present) to preserve folder_var
-    assignments, user_prefix, user_suffix, and trailing comments. New
-    plugins land in the first declared folder var.
+    assignments, user_prefix, user_suffix, and trailing comments.
+
+    Source-aware routing: a brand-new exception (no on-disk line to inherit
+    a ``folder_var`` from) is routed through the plugin's ``source`` to the
+    matching folder var, exactly like
+    :func:`NukeSurvivalLoadout.ui.wiring.events._build_chain_model`. Global
+    plugins land under ``GLOBAL_PLUGINS_VAR_NAME``. A plugin whose source
+    resolves to no configured folder raises :class:`_UnroutablePlugin` so
+    the caller blocks the item instead of dumping it in the first folder.
     """
+    user_dirs = list(getattr(registry, "user_plugin_dirs", []) or [])
     target = _chain_loadout_init_path(loadouts_dir, stem)
     try:
         base_model = read_chain_loadout(str(target))
     except (OSError, SyntaxError):
         folders = [
             FolderDecl(var=f"plugins_{chr(ord('A') + idx)}", path=path)
-            for idx, path in enumerate(user_plugin_dirs or [])
+            for idx, path in enumerate(user_dirs)
         ]
         base_model = LoadoutModel(folders=folders)
 
-    bucket_var = base_model.folders[0].var if base_model.folders else "plugins_A"
+    routing = _build_routing_map(registry)
     on_disk_by_name = {entry.name: entry for entry in base_model.plugins}
+
+    # Ensure a FolderDecl exists for the Global var when we route any Global
+    # exception into it (the on-disk head may not declare it yet). Mirrors
+    # the Global block append in ``_build_chain_model``.
+    folders = list(base_model.folders)
+    have_global_decl = any(
+        decl.var == GLOBAL_PLUGINS_VAR_NAME for decl in folders
+    )
 
     new_plugins: list[ChainPluginEntry] = []
     for name, entry in legacy_model.plugins.items():
@@ -101,21 +174,48 @@ def _build_chain_from_legacy(
                     trailing_comment=existing.trailing_comment,
                 )
             )
-        else:
-            new_plugins.append(
-                ChainPluginEntry(
-                    folder_var=bucket_var,
-                    name=name,
-                    gui=entry.gui_only,
-                    disabled=not entry.enabled,
+            continue
+        folder_var = routing.get(name)
+        if folder_var is None:
+            # No on-disk line to inherit a var from and no source that maps
+            # to a configured folder - misrouting would write the directive
+            # against the wrong path. Refuse instead of guessing.
+            raise _UnroutablePlugin(name)
+        if folder_var == GLOBAL_PLUGINS_VAR_NAME and not have_global_decl:
+            global_dirs = list(getattr(registry, "global_plugin_dirs", []) or [])
+            if global_dirs:
+                folders.append(
+                    FolderDecl(
+                        var=GLOBAL_PLUGINS_VAR_NAME, path=str(global_dirs[0])
+                    )
                 )
+                have_global_decl = True
+        new_plugins.append(
+            ChainPluginEntry(
+                folder_var=folder_var,
+                name=name,
+                gui=entry.gui_only,
+                disabled=not entry.enabled,
             )
+        )
+
+    # When we appended a new folder decl (the Global var the on-disk head
+    # didn't declare), the preserved ``user_prefix`` no longer declares
+    # every var the managed block references - a boot-time NameError on the
+    # undeclared var. Reset ``user_prefix`` so ``render`` rebuilds a
+    # canonical head that declares all folder vars. Mirrors
+    # ``boot.loadout_file.sync_folders`` and ``_build_chain_model``, which
+    # reset the prefix for the same reason. Untouched (no new folder decl)
+    # files keep their verbatim prefix.
+    user_prefix = (
+        "" if len(folders) != len(base_model.folders) else base_model.user_prefix
+    )
 
     return LoadoutModel(
         docstring=base_model.docstring,
-        folders=list(base_model.folders),
+        folders=folders,
         plugins=new_plugins,
-        user_prefix=base_model.user_prefix,
+        user_prefix=user_prefix,
         user_suffix=base_model.user_suffix,
         # Preserve any hand-authored text above the NSL prologue markers
         # (Issue 2). For a legacy file this is "" and the whole head still
@@ -135,7 +235,7 @@ def _set_plugin_entry(
     is_global_plugin: bool = False,
     previous_entry: Optional[PluginEntry] = None,
     global_model: Optional[LoadoutFile] = None,
-    user_plugin_dirs: Iterable[str] = (),
+    registry=None,
 ) -> loadout_ops.OpResult:
     """Set ``plugin_name`` to ``next_entry`` and persist.
 
@@ -205,9 +305,27 @@ def _set_plugin_entry(
             blocked=None,
         )
 
-    chain_model = _build_chain_from_legacy(
-        Path(loadouts_dir), state.active, new_legacy, user_plugin_dirs
-    )
+    try:
+        chain_model = _build_chain_from_legacy(
+            Path(loadouts_dir), state.active, new_legacy, registry
+        )
+    except _UnroutablePlugin as exc:
+        # A brand-new exception whose source maps to no configured folder.
+        # Block the item rather than misrouting it into the first folder
+        # (where it would miss at boot and the correct sweep would load it
+        # default-on). Nothing on disk changed.
+        return loadout_ops.OpResult(
+            path=None,
+            model=active_model,  # type: ignore[arg-type]
+            state=state,
+            blocked=loadout_ops.Blocked(
+                code=loadout_ops.BlockedReason.SOURCE_NOT_FOUND,
+                detail=(
+                    f"Plugin '{exc.plugin_name}' source does not map to any "
+                    "configured Plugins Folder; refusing to misroute."
+                ),
+            ),
+        )
     save_result = loadout_ops.save(
         Path(loadouts_dir), state.active, chain_model, state
     )
@@ -217,6 +335,35 @@ def _set_plugin_entry(
         state=save_result.state,
         blocked=save_result.blocked,
     )
+
+
+# ---------------------------------------------------------------------------
+# Block handling
+# ---------------------------------------------------------------------------
+
+
+def _handle_bulk_block(registry, result: loadout_ops.OpResult) -> None:
+    """Triage a Blocked result raised inside the bulk write loop.
+
+    Two block shapes can reach here:
+
+    * ``global_plugin`` - setting / clearing ``gui_only`` on a Global
+      plugin. This is a silent skip by design ("no error, no surprise"):
+      we deliberately do NOT surface it. The plan builder already
+      pre-filters these, so it is largely theoretical here.
+    * ``source_not_found`` - a brand-new exception whose source maps to no
+      configured Plugins Folder (see :func:`_build_chain_from_legacy`).
+      Misrouting it would write the directive against the wrong path, so
+      we refuse and surface it through ``registry.on_blocked`` (when
+      present) instead of silently dropping it.
+    """
+    blocked = result.blocked
+    if blocked is None:
+        return
+    if blocked.code == loadout_ops.BlockedReason.SOURCE_NOT_FOUND:
+        log = getattr(registry, "on_blocked", None)
+        if log is not None:
+            log(blocked)
 
 
 # ---------------------------------------------------------------------------
@@ -485,14 +632,15 @@ def _run_bulk_from_global(
         is_global_plugin=(first_key in global_base),
         previous_entry=first_prev,
         global_model=registry.global_model,
+        registry=registry,
     )
     if first_result.is_blocked:
-        # The plan builder filtered Global gui_only out already, so
-        # a Blocked here means the Global rule fired against an
-        # enabled toggle that the plan builder couldn't pre-filter.
-        # Only gui_only-on-Global is ever blocked, so this
-        # branch is theoretical; we treat it as a silent skip for
-        # symmetry and move on to the next plan item.
+        # Two block shapes can reach here: a silent Global gui_only refusal
+        # (the plan builder pre-filters most of these) or a source_not_found
+        # refusal when a brand-new exception cannot be routed to a folder.
+        # ``_handle_bulk_block`` surfaces the latter and silently drops the
+        # former; either way we move on to the next plan item.
+        _handle_bulk_block(registry, first_result)
         if len(plan) == 1:
             return
         return _run_bulk_from_global(
@@ -579,12 +727,14 @@ def _apply_plan(
             is_global_plugin=(key in global_base),
             previous_entry=previous,
             global_model=registry.global_model,
+            registry=registry,
         )
         if result.is_blocked:
-            # Silent skip by design. We deliberately do NOT invoke
-            # registry.on_blocked here - bulk gui_only on Global
-            # is a "no error, no surprise" case. Move on without
-            # disturbing the bulk count.
+            # A Global gui_only refusal is a silent skip ("no error, no
+            # surprise"); a source_not_found refusal is surfaced via
+            # registry.on_blocked. Either way the item does not enter the
+            # bulk count. ``_handle_bulk_block`` triages by code.
+            _handle_bulk_block(registry, result)
             continue
         # Push the per-Plugin payload into the bulk buffer; the
         # UndoStack coalesces them into one entry on context exit.
@@ -623,8 +773,10 @@ def _run_bulk_without_stack(
             is_global_plugin=(key in global_base),
             previous_entry=previous,
             global_model=registry.global_model,
+            registry=registry,
         )
         if result.is_blocked:
+            _handle_bulk_block(registry, result)
             continue
         registry.apply_op_result(result)
 
