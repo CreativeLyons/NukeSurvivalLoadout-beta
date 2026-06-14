@@ -31,7 +31,7 @@ from NukeSurvivalLoadout.boot.dispatcher import (
     read_dispatcher,
     write_dispatcher,
 )
-from NukeSurvivalLoadout.constants import loadouts_dir
+from NukeSurvivalLoadout.constants import RESERVED_LOADOUT_STEM, loadouts_dir
 from NukeSurvivalLoadout.data.loadout_file import LoadoutFile
 
 
@@ -129,7 +129,7 @@ def reset_global_to_default(
             f"{sorted(_VALID_SCOPES)}; got {scope!r}"
         )
 
-    if loadout.name == "Global":
+    if loadout.name == RESERVED_LOADOUT_STEM:
         raise ValueError(
             "reset_global_to_default: refusing to operate on the Global Loadout; "
             "Global is read-only"
