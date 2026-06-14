@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional
 
 from NukeSurvivalLoadout.boot.dispatcher import (
+    BACKUP_SUFFIX,
     DispatcherState,
     read_dispatcher,
     write_dispatcher,
@@ -203,19 +204,42 @@ def build_registry_for_panel(
 def _load_dispatcher_state(
     dispatcher_path: Path,
 ) -> tuple[DispatcherState, Optional[str]]:
-    """Read the dispatcher state, falling back to defaults on hard error.
+    """Read the dispatcher state, surfacing a structured error on damage.
 
-    The dispatcher reader already tolerates missing / SyntaxError-laden
-    files by returning ``DispatcherState()`` defaults; this wrapper
-    catches OSError for filesystem-level failures (perm denied, etc.)
-    and surfaces them as a structured error string for the degraded
-    panel.
+    The dispatcher reader returns a genuine first-run default for a
+    MISSING file (``DispatcherState()``) but flags a present-but-
+    unparseable file as ``DispatcherState(malformed=True)``. The two are
+    deliberately NOT conflated here:
+
+    * Missing / clean -> ``(state, None)``: normal boot, no error.
+    * **Malformed** -> ``(state, error)``: the file is on disk but broke
+      to a ``SyntaxError`` (a hand-edit typo on the user-editable
+      dispatcher). We surface a structured error so the panel enters
+      degraded read-only mode and warns the user, rather than treating
+      the damaged file as empty and letting the next write reset
+      panic / active / folders. The original bytes are preserved by
+      ``write_dispatcher`` (``.bak`` side-copy) before any such write.
+    * OSError -> ``(default, error)``: filesystem-level failure (perm
+      denied, etc.) - also surfaced for the degraded panel.
     """
     try:
-        return read_dispatcher(str(dispatcher_path)), None
+        state = read_dispatcher(str(dispatcher_path))
     except OSError as exc:
         _log.warning("dispatcher unreadable; falling back to defaults: %s", exc)
         return DispatcherState(), f"dispatcher unreadable: {exc}"
+
+    if state.malformed:
+        _log.warning(
+            "dispatcher malformed (unparseable); entering degraded mode: %s",
+            dispatcher_path,
+        )
+        return state, (
+            f"dispatcher malformed (unparseable Python): {dispatcher_path}. "
+            "Repair the file or reset it; the original was preserved as a "
+            f"'{dispatcher_path.name}{BACKUP_SUFFIX}' side-copy before any rewrite."
+        )
+
+    return state, None
 
 
 @dataclass(frozen=True)

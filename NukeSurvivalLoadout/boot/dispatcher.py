@@ -24,12 +24,20 @@ syntax pre-validation and no crash banner - recovery is edit-and-relaunch.
 from __future__ import annotations
 
 import ast
+import os
+import shutil
 from dataclasses import dataclass, field
 
 from NukeSurvivalLoadout.atomic_io import write_atomic
 from NukeSurvivalLoadout.boot.loadout_file import FolderDecl, _try_folder_decl
 
 __all__ = ["DispatcherState", "read_dispatcher", "write_dispatcher", "render"]
+
+#: Suffix for the side-copy taken before a malformed dispatcher is
+#: overwritten / reset. A hand-edit typo leaves the file syntactically
+#: broken but populated; ``write_dispatcher`` preserves those original
+#: bytes here so the damaged-but-recoverable content is never lost.
+BACKUP_SUFFIX = ".bak"
 
 # Dispatcher constant names that are NOT folder declarations - excluded when
 # parsing the top-level ``plugins_X = "..."`` folder block.
@@ -56,6 +64,15 @@ class DispatcherState:
     panic: bool = False
     active: str = ""
     folders: list[FolderDecl] = field(default_factory=list)
+    #: ``True`` only when ``read_dispatcher`` found the file on disk but
+    #: could NOT parse it (a populated-but-broken dispatcher, e.g. a
+    #: hand-edit typo). A MISSING file is a genuine first-run default and
+    #: leaves this ``False`` - so a malformed read is never silently
+    #: equated with an empty one. It participates in equality so callers
+    #: and tests can distinguish ``DispatcherState(malformed=True)`` from
+    #: the plain default, but ``render`` ignores it (rendered bytes depend
+    #: only on panic / active / folders).
+    malformed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -121,9 +138,23 @@ def read_dispatcher(path: str) -> DispatcherState:
 
     AST-walks the file for top-level assignments of ``PANIC_MODE`` and
     ``ACTIVE_LOADOUT``. Tolerates either ordering and ignores any other
-    top-level statements. Missing or unparseable constants fall back to
-    the dataclass defaults; a missing file is treated as defaults with
-    no side effects (no implicit write).
+    top-level statements. Missing or unparseable individual constants
+    fall back to the dataclass defaults.
+
+    Two failure modes are deliberately kept DISTINCT:
+
+    * **Missing file** - a genuine first-run default. Returns
+      ``DispatcherState()`` (``malformed=False``) with no side effects
+      (no implicit write).
+    * **Malformed file** - present on disk but a whole-file
+      ``SyntaxError`` (e.g. a hand-edit typo: the dispatcher is
+      documented as user-editable). Returns
+      ``DispatcherState(malformed=True)``. The panic flag, active
+      pointer, and folder authority are NOT recoverable from a file that
+      will not parse, so the state carries defaults for those - but the
+      ``malformed`` flag lets the caller refuse to treat the file as
+      empty and back it up before any overwrite (see
+      :func:`write_dispatcher`).
     """
     try:
         # Pinned to UTF-8 to match the write side (atomic_io.write_atomic)
@@ -137,9 +168,12 @@ def read_dispatcher(path: str) -> DispatcherState:
     try:
         tree = ast.parse(source, filename=path)
     except SyntaxError:
-        # A corrupt dispatcher is treated as defaults - the caller (panel,
-        # install/repair) is responsible for rewriting a clean one.
-        return DispatcherState()
+        # A corrupt dispatcher is NOT a default - the file is present and
+        # populated, just unparseable. Flag it ``malformed`` so the
+        # bootstrap enters degraded mode and ``write_dispatcher`` backs up
+        # the original bytes before any rewrite, rather than silently
+        # equating it with a fresh (missing) install and wiping config.
+        return DispatcherState(malformed=True)
 
     state = DispatcherState()
 
@@ -192,11 +226,60 @@ def _extract_str(node: ast.expr) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _backup_if_malformed(path: str) -> str | None:
+    """Copy ``path`` to ``path + BACKUP_SUFFIX`` when it is on-disk but unparseable.
+
+    Returns the backup path when a copy was taken, else ``None``. A
+    populated-but-broken dispatcher (a hand-edit typo) is damaged but
+    recoverable: this preserves its original bytes verbatim before the
+    caller overwrites the file with a canonical render, so config that was
+    only one typo away from intact is never silently lost.
+
+    Defensive by design: a missing file, a clean (parseable) file, or any
+    OSError reading/copying the original is a no-op (we do not block the
+    write on a best-effort backup, and a clean file needs no backup). The
+    copy uses ``shutil.copy2`` to keep the original bytes and mtime; a
+    pre-existing ``.bak`` is overwritten so the latest damaged version is
+    the one preserved.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            source = fh.read()
+    except OSError:
+        # Missing (first run) or unreadable - nothing recoverable to save.
+        return None
+
+    try:
+        ast.parse(source, filename=path)
+    except SyntaxError:
+        pass  # malformed - fall through to the backup copy
+    else:
+        return None  # parseable - canonical overwrite loses nothing
+
+    backup = path + BACKUP_SUFFIX
+    try:
+        shutil.copy2(path, backup)
+    except OSError:
+        # Best-effort: a failed backup must not block a panic toggle or
+        # repair write. The malformed flag still routes the panel to
+        # degraded mode so the user is warned before relying on the rewrite.
+        return None
+    return backup
+
+
 def write_dispatcher(path: str, state: DispatcherState) -> None:
     """Atomically write the canonical dispatcher for ``state`` to ``path``.
 
     Delegates to ``NukeSurvivalLoadout.atomic_io.write_atomic`` (tempfile + fsync +
     ``os.replace``). Idempotent - re-calling with the same state on a
     matching file is a byte-for-byte no-op at the content level.
+
+    SAFETY: before the replace, if the existing ``path`` is present but
+    unparseable, its original bytes are copied to ``path + BACKUP_SUFFIX``
+    (see :func:`_backup_if_malformed`). This means a malformed dispatcher
+    that a write would otherwise overwrite with reset defaults
+    (``panic=False`` / ``active=""`` / no folders) is never lost without a
+    recoverable side-copy. A clean or missing file is untouched.
     """
+    _backup_if_malformed(os.fspath(path))
     write_atomic(path, render(state))
