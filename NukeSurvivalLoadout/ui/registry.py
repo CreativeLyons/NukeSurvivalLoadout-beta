@@ -865,15 +865,24 @@ class Registry:
         reorder (including while Custom is active), after undo / redo
         of a folder op, and on Revert when the folder baseline differs.
 
-        panic + active are read back from the on-disk dispatcher and
-        left untouched (only ``folders`` is rewritten), so this is
-        independent of when ``self.state`` settles and never writes
-        ``Custom`` as the active pointer (Custom is in-memory only -
-        the dispatcher keeps the last real loadout).
+        panic + active come from the in-memory :attr:`state` (the
+        bootstrap-normalised, op-synced mirror), NOT a fresh re-read of
+        disk. Re-reading disk was the resurrection bug: the bootstrap
+        normalises a stale ``ACTIVE_LOADOUT="Custom"`` pointer to "" in
+        memory, but a disk re-read here pulled the unchanged ``Custom``
+        back and wrote it out again - violating the "Custom is in-memory
+        only" invariant and re-arming the spurious "missing: Custom" boot
+        log. Writing ``self.state`` carries the normalisation through; the
+        Custom slot is additionally coerced to "" below as a belt so an
+        in-memory pending-Custom pointer never lands on disk. ``panic`` and
+        the last real active loadout are preserved.
         ``sync_folders_to_loadouts`` then fans the canonical decls into
         each loadout file, remapping plugin entries by PATH so reorders
         stay correct.
         """
+        from dataclasses import replace
+
+        from NukeSurvivalLoadout.constants import DEFAULT_CUSTOM_LOADOUT_STEM
         from NukeSurvivalLoadout.boot.dispatcher import (
             read_dispatcher,
             write_dispatcher,
@@ -891,9 +900,19 @@ class Registry:
             for i, path in enumerate(dirs)
         ]
 
-        state = read_dispatcher(dispatcher)
-        state.folders = canonical
-        write_dispatcher(dispatcher, state)
+        # Base the write on the in-memory normalised state when present;
+        # fall back to a disk read only for degraded fixtures that drive
+        # the registry without a state (tests / headless).
+        base_state = getattr(self, "state", None)
+        if base_state is None:
+            base_state = read_dispatcher(dispatcher)
+        # Never persist the in-memory-only Custom wildcard as the active
+        # pointer (bootstrap may synthesise ``active="Custom"`` in memory).
+        active = base_state.active
+        if active == DEFAULT_CUSTOM_LOADOUT_STEM:
+            active = ""
+        write_state = replace(base_state, active=active, folders=canonical)
+        write_dispatcher(dispatcher, write_state)
         if getattr(self, "state", None) is not None:
             self.state.folders = list(canonical)
 

@@ -107,9 +107,19 @@ def build_registry_for_panel(
     # dropdown-switch; normalise any such stale pointer to "" so
     # ``_load_active`` doesn't chase a non-existent ``loadouts/Custom/``
     # folder (surfacing a spurious "missing" error) and the pending-Custom
-    # synthesis below applies instead.
+    # synthesis below applies instead. WRITE the normalisation back once
+    # (same guarded pattern as the Global_Loadout case below): a
+    # memory-only reset left ``ACTIVE_LOADOUT="Custom"`` on disk, and a
+    # later ``persist_folder_authority`` that re-read the unchanged
+    # dispatcher would resurrect it - re-triggering the spurious
+    # "missing: Custom" log on every boot. Converging disk here ends that
+    # cycle on the first open.
     if state.active == DEFAULT_CUSTOM_LOADOUT_STEM:
         state.active = ""
+        try:
+            write_dispatcher(str(dispatcher_file), state)
+        except OSError as exc:
+            _log.warning("could not persist Custom pointer reset: %s", exc)
     # Case B normalize-and-persist: when the Global copy of
     # ``Global_Loadout`` exists, the user-land loadout of the same name is
     # hidden and never activatable - a stale dispatcher pointer at it is
