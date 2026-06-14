@@ -870,9 +870,16 @@ class Registry:
         independent of when ``self.state`` settles and never writes
         ``Custom`` as the active pointer (Custom is in-memory only -
         the dispatcher keeps the last real loadout).
-        ``sync_folders_to_loadouts`` then fans the canonical decls into
-        each loadout file, remapping plugin entries by PATH so reorders
-        stay correct.
+        ``sync_folders_to_loadouts`` fans the canonical decls into each
+        loadout file, remapping plugin entries by PATH so reorders stay
+        correct. That fan-out runs BEFORE the dispatcher write and is
+        transactional: it stages + validates every loadout, rolls back any
+        already-written files and re-raises on a mid-stream write failure,
+        and reports loadouts it had to skip (unreadable / malformed) via
+        ``result.skipped`` - which is logged prominently here rather than
+        silently swallowed. Committing the dispatcher only after a clean
+        fan-out keeps the folder authority from advancing past a stale
+        suffix of loadouts.
         """
         from NukeSurvivalLoadout.boot.dispatcher import (
             read_dispatcher,
@@ -891,13 +898,27 @@ class Registry:
             for i, path in enumerate(dirs)
         ]
 
+        # Fan out into the loadouts FIRST, then advance the dispatcher. The
+        # fan-out stages + validates every loadout before writing any, and on
+        # a mid-stream write failure it rolls the already-written files back
+        # and re-raises. Committing the dispatcher only after that succeeds
+        # keeps the authority (dispatcher folder set) from advancing past the
+        # loadouts: a failure leaves dispatcher AND loadouts on the old set,
+        # not the dispatcher ahead of a stale suffix of loadouts.
+        result = sync_folders_to_loadouts(loadouts_dir, canonical)
+        if result.skipped:
+            for stem, reason in result.skipped:
+                _log.warning(
+                    "folder sync skipped loadout %r (left on stale folders): %s",
+                    stem,
+                    reason,
+                )
+
         state = read_dispatcher(dispatcher)
         state.folders = canonical
         write_dispatcher(dispatcher, state)
         if getattr(self, "state", None) is not None:
             self.state.folders = list(canonical)
-
-        sync_folders_to_loadouts(loadouts_dir, canonical)
 
     def scan_and_refresh(self) -> None:
         """Scan every configured Plugins Folder and refresh the UI.
