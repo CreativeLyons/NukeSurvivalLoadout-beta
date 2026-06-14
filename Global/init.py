@@ -12,7 +12,7 @@ global_loadout = "./Global_Loadout"
 # ─── NSL loader ────────────────────────────
 try:
     from NukeSurvivalLoadout.boot.global_loader import nsl_load_global
-    nsl_load_global(global_plugins, global_loadout)
+    nsl_load_global(global_plugins, global_loadout, base=__file__)
 except ImportError:
     import os
     import nuke

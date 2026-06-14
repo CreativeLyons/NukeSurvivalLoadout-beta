@@ -94,14 +94,28 @@ def _default_head_dir() -> str:
 def _resolve_base(base: Optional[str]) -> str:
     """Return the folder the head's relative paths anchor to.
 
-    ``base`` may be the head file path or its folder. When ``None``, the
-    calling file's location is derived from the caller's frame (the head
-    calls :func:`nsl_load_global` directly); if that fails, fall back to
-    the shipped ``<repo>/Global/`` location.
+    ``base`` may be the head file path (``Global/init.py`` passes its own
+    ``__file__``) or that file's folder. A file path resolves to its
+    containing folder; a folder passes through unchanged. The file-vs-folder
+    decision does not depend on the path existing on disk, so an explicit
+    ``base=__file__`` anchors the relative paths to the head's real location
+    no matter how deep the call stack is.
+
+    When ``base`` is ``None`` (a caller that passes nothing), the calling
+    file's location is derived from the caller's frame as a best-effort
+    fallback; if that fails, fall back to the shipped ``<repo>/Global/``
+    location. The frame walk is the last resort - prefer passing ``base``.
     """
     if base:
         base = os.path.abspath(os.path.expanduser(str(base)))
-        return os.path.dirname(base) if os.path.isfile(base) else base
+        # Treat as a file (anchor to its folder) when it is a real file OR
+        # carries a filename suffix and is not an existing directory. This
+        # keeps ``base=__file__`` correct even if the file is not on disk.
+        if os.path.isdir(base):
+            return base
+        if os.path.isfile(base) or os.path.splitext(base)[1]:
+            return os.path.dirname(base)
+        return base
     import sys
 
     try:
