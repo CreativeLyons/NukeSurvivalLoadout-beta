@@ -324,9 +324,13 @@ def nsl_load_global(
     loadout_dir = resolve_global_path(loadout, base_dir)
 
     try:
-        from NukeSurvivalLoadout.boot.session_record import record_global_dir
+        from NukeSurvivalLoadout.boot.session_record import (
+            record_global_dir,
+            record_global_loadout_dir,
+        )
 
         record_global_dir(plugins_dir)
+        record_global_loadout_dir(loadout_dir)
     except Exception:  # noqa: BLE001 - recording must never block boot
         pass
 
