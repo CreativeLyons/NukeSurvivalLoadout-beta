@@ -46,14 +46,12 @@ from dataclasses import dataclass, replace
 from typing import FrozenSet, Iterable, List, Optional, Sequence, Tuple, Union
 
 from NukeSurvivalLoadout.boot.loadout_file import FolderDecl, LoadoutModel, write_loadout
+from NukeSurvivalLoadout.domain.scanner import plugin_folder_has_content
 from NukeSurvivalLoadout.paths import canon_for_compare
 from NukeSurvivalLoadout.constants import (
     GLOBAL_PLUGINS_VAR_NAME,
     PLUGIN_FOLDER_IGNORE_NAMES,
     PLUGIN_FOLDER_IGNORE_PREFIXES,
-    PLUGIN_GITKEEP_EXCEPTION,
-    PLUGIN_NON_CONTENT_FILE_NAMES,
-    PLUGIN_NON_CONTENT_FILE_PREFIX,
 )
 
 
@@ -103,31 +101,6 @@ def _name_is_ignored(name: str) -> bool:
     return name.startswith(PLUGIN_FOLDER_IGNORE_PREFIXES)
 
 
-def _file_counts_as_content(name: str) -> bool:
-    if name == PLUGIN_GITKEEP_EXCEPTION:
-        return True
-    if name in PLUGIN_NON_CONTENT_FILE_NAMES:
-        return False
-    if name.startswith(PLUGIN_NON_CONTENT_FILE_PREFIX):
-        return False
-    return True
-
-
-def _subfolder_has_content(folder: str) -> bool:
-    try:
-        with os.scandir(folder) as it:
-            for entry in it:
-                if entry.is_dir(follow_symlinks=False):
-                    return True
-                if entry.is_file(follow_symlinks=False) and _file_counts_as_content(entry.name):
-                    return True
-        return False
-    except PermissionError:
-        return False
-    except OSError:
-        return False
-
-
 def health_check(path: PathLike) -> FolderHealth:
     target = os.fspath(path)
 
@@ -158,14 +131,24 @@ def health_check(path: PathLike) -> FolderHealth:
     has_plugin = False
     with scanner as it:
         for entry in it:
+            # ``follow_symlinks=True`` (the default) so this matches
+            # ``scanner.scan_folder``: a TD who symlinks Plugin folders into a
+            # Plugins Folder gets them discovered in the grid, and health must
+            # agree (Issue 18). Broken / circular symlinks naturally return
+            # False from ``is_dir`` (and raise no exception in practice, but we
+            # guard ``OSError`` anyway), so they are never miscounted.
             try:
-                if not entry.is_dir(follow_symlinks=False):
+                if not entry.is_dir():
                     continue
             except OSError:
                 continue
             if _name_is_ignored(entry.name):
                 continue
-            if not _subfolder_has_content(entry.path):
+            # The shared predicate (scanner.plugin_folder_has_content) keeps
+            # discovery and health classification on one symlink + content
+            # policy; it follows links and tolerates broken/inaccessible
+            # entries without raising.
+            if not plugin_folder_has_content(entry.path):
                 continue
             has_plugin = True
             break
