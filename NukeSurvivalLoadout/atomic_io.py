@@ -62,6 +62,38 @@ def _replace_with_retry(tmp: str, target: str) -> None:
     os.replace(tmp, target)
 
 
+def _fsync_parent_dir(target: str) -> None:
+    """Best-effort fsync of ``target``'s parent directory (POSIX only).
+
+    Completing the durable-rename idiom: after the file bytes are fsync'd
+    and the temp is replaced over the target, the new directory entry is
+    only durable once the parent directory itself is fsync'd. Without this
+    a power loss right after the rename can lose the entry even though the
+    bytes survived.
+
+    Best-effort by design. Windows has no meaningful directory fsync, and
+    some network mounts (NFS/SMB) reject ``fsync`` on a directory fd; in
+    every such case we degrade silently rather than fail an otherwise
+    successful write. Any ``OSError`` (including the missing-support path)
+    and ``AttributeError`` on platforms lacking ``os.fsync`` are swallowed.
+    """
+    if os.name != "posix":
+        return
+    parent = os.path.dirname(target)
+    if not parent:
+        parent = "."
+    try:
+        dir_fd = os.open(parent, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except (OSError, AttributeError):
+        pass
+    finally:
+        os.close(dir_fd)
+
+
 def write_atomic(path: PathLike, content: Union[str, bytes]) -> None:
     """Write ``content`` to ``path`` via write-to-temp-then-rename.
 
@@ -78,6 +110,12 @@ def write_atomic(path: PathLike, content: Union[str, bytes]) -> None:
     ``sweep_orphan_tmp``, which the panel runs at bootstrap over
     ``loadouts_dir`` and each loadout subfolder - see
     ``NukeSurvivalLoadout.ui.registry_bootstrap.build_registry_for_panel``).
+
+    After a successful replace, the parent directory is fsync'd best-effort
+    on POSIX so a power loss right after the rename cannot lose the new
+    directory entry. The directory fsync is swallowed on failure (network
+    mounts that reject it degrade rather than fail the write) and skipped
+    entirely on platforms without ``os.fsync`` directory support.
     """
     target = os.fspath(path)
     ensure_parent_dir(target)
@@ -111,6 +149,11 @@ def write_atomic(path: PathLike, content: Union[str, bytes]) -> None:
         raise
 
     _replace_with_retry(tmp, target)
+
+    # Durable rename: the directory entry created by the replace is only
+    # guaranteed to survive a power loss once the parent directory is also
+    # fsync'd. Best-effort and POSIX-only; see ``_fsync_parent_dir``.
+    _fsync_parent_dir(target)
 
 
 def sweep_orphan_tmp(folder: PathLike) -> int:
