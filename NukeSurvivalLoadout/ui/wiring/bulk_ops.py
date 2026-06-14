@@ -117,6 +117,11 @@ def _build_chain_from_legacy(
         plugins=new_plugins,
         user_prefix=base_model.user_prefix,
         user_suffix=base_model.user_suffix,
+        # Preserve any hand-authored text above the NSL prologue markers
+        # (Issue 2). For a legacy file this is "" and the whole head still
+        # rides verbatim in user_prefix above; for a re-saved file user_prefix
+        # is "" and the head is regenerated from folders.
+        user_prologue=base_model.user_prologue,
     )
 
 

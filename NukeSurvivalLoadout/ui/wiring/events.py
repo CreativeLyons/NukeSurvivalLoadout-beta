@@ -122,10 +122,15 @@ def _build_chain_model(
 
     Trailing comments on existing on-disk exception lines are preserved.
 
-    The file head (imports + folder vars + helper) is authored fresh every
+    The NSL prologue (imports + folder vars + helper) is authored fresh every
     write: ``user_prefix`` is dropped so a folder add/remove always
-    re-declares the ``plugins_X`` vars. Genuine user content below the
-    END marker (``user_suffix``) is still preserved verbatim.
+    re-declares the ``plugins_X`` vars. Genuine user content is still
+    preserved verbatim on both sides of the managed region: hand-authored
+    text ABOVE the NSL prologue markers rides in ``user_prologue`` and text
+    below the END marker rides in ``user_suffix``. Both are read back from
+    the on-disk model and carried forward unchanged (Issue 2 - the old code
+    zeroed user_prefix and, because a legacy parse folded the prologue text
+    into it, silently discarded any custom import/helper above the markers).
     """
     # On-disk model - read solely to preserve trailing comments on calls.
     target = _chain_loadout_path(registry, stem)
@@ -210,6 +215,11 @@ def _build_chain_model(
         plugins=new_plugins,
         user_prefix="",
         user_suffix=base_model.user_suffix,
+        # Carry the hand-authored prologue forward so a panel Save preserves
+        # any custom Python the user placed above the NSL prologue markers
+        # (Issue 2). ``user_prefix`` stays empty so render() regenerates the
+        # NSL head from ``folders`` - no stale plugins_X decls.
+        user_prologue=base_model.user_prologue,
     )
 
 

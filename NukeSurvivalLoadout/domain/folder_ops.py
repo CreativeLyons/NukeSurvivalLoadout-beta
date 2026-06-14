@@ -8,11 +8,13 @@ loadout file back to disk via
 :func:`NukeSurvivalLoadout.boot.loadout_file.write_loadout` (atomic-replace).
 
 When mutating ``model.folders`` we always clear ``model.user_prefix`` so
-the renderer regenerates the canonical prefix (imports + folder vars +
-helper) from scratch. User customisations inside that prefix are lost
-on edit - that's the explicit contract of the "NSL manages the folder
-var region" rule. Anything the user wants preserved across folder edits
-belongs *below* the ``# === BEGIN NSL MANAGED PLUGINS ===`` marker.
+the renderer regenerates the NSL prologue (imports + folder vars + helper)
+from scratch - that's the "NSL manages the folder var region" rule. The
+regenerated region is exactly what sits BETWEEN the ``# === BEGIN/END NSL
+PROLOGUE ===`` markers; ``replace`` carries ``model.user_prologue`` (the
+hand-authored text ABOVE those markers) and ``model.user_suffix`` (below
+the END-managed marker) forward untouched. So a folder edit preserves the
+user's custom imports / helpers and only rewrites the generated head.
 
 Public surface:
     - ``HealthState`` - Healthy / Unreachable / PermissionDenied / Empty

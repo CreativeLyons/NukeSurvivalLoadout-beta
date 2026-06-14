@@ -4,9 +4,14 @@ Responsibilities:
   - Parse a user loadout file into a ``LoadoutModel`` (AST-driven, so a
     user's hand-edits don't have to be byte-perfect to round-trip).
   - Render a ``LoadoutModel`` back to canonical text: section ordering
-    is fixed; the managed block is authored entirely by NSL.
-  - Preserve everything outside the managed markers verbatim
-    (``user_prefix`` before BEGIN, ``user_suffix`` after END).
+    is fixed; the managed block AND the prologue (imports + folder vars +
+    helper, wrapped in ``# === BEGIN/END NSL PROLOGUE ===`` markers) are
+    authored entirely by NSL and regenerated on every write.
+  - Preserve everything OUTSIDE the NSL-owned regions verbatim:
+    ``user_prologue`` (hand-authored text above the prologue markers) and
+    ``user_suffix`` (after the END-managed marker). Legacy files written
+    before the prologue markers existed carry their whole head verbatim in
+    ``user_prefix`` instead, and gain the prologue markers on next save.
   - Atomic write via ``NukeSurvivalLoadout.atomic_io.write_atomic``.
 
 Non-goals:
@@ -36,6 +41,8 @@ from NukeSurvivalLoadout.constants import GLOBAL_PLUGINS_VAR_NAME
 __all__ = [
     "BEGIN_MARKER",
     "END_MARKER",
+    "BEGIN_PROLOGUE_MARKER",
+    "END_PROLOGUE_MARKER",
     "FolderDecl",
     "PluginEntry",
     "LoadoutModel",
@@ -49,6 +56,17 @@ __all__ = [
 
 BEGIN_MARKER = "# === BEGIN NSL MANAGED PLUGINS ==="
 END_MARKER = "# === END NSL MANAGED PLUGINS ==="
+
+# Prologue markers wrap the NSL-authored file head (imports + folder vars +
+# helper). Everything ABOVE the BEGIN-prologue marker is hand-authored
+# user code that NSL must preserve verbatim across every rebuild; the body
+# BETWEEN the prologue markers is owned by NSL and regenerated from the
+# model's ``folders`` on each render. Files written before these markers
+# existed have no prologue pair: their whole head is treated as one
+# verbatim ``user_prefix`` blob (see ``_split_on_markers``), and the
+# prologue markers get added on their next save.
+BEGIN_PROLOGUE_MARKER = "# === BEGIN NSL PROLOGUE ==="
+END_PROLOGUE_MARKER = "# === END NSL PROLOGUE ==="
 
 # Pre-rename marker spelling. Accepted on read so loadout files written
 # before the rename still parse; they pick up the new markers on their
@@ -100,6 +118,11 @@ class LoadoutModel:
     plugins: list[PluginEntry] = field(default_factory=list)
     user_prefix: str = ""
     user_suffix: str = ""
+    # Hand-authored text that sits ABOVE the NSL prologue markers - custom
+    # imports, helpers, comments the user placed before the generated head.
+    # Preserved verbatim across every Save / folder-sync rebuild. Empty for
+    # legacy files (no prologue markers); their head rides in ``user_prefix``.
+    user_prologue: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -168,9 +191,22 @@ def _parse_source(source: str) -> LoadoutModel:
     """Parse the loadout source string. Public surface is ``read_loadout``."""
     user_prefix, managed_body, user_suffix = _split_on_markers(source)
 
-    # Outside the markers: parse with AST to pull docstring + folder decls.
-    # ``managed_body`` is parsed only for plugin entries.
-    prefix_tree = ast.parse(user_prefix) if user_prefix.strip() else ast.Module(body=[], type_ignores=[])
+    # Within the pre-MANAGED region, peel the NSL prologue (imports + folder
+    # vars + helper) away from any hand-authored text that sits above it.
+    # ``user_prologue`` is that hand-authored text, preserved verbatim on
+    # render; ``prologue_body`` is the regenerable NSL head, parsed below for
+    # docstring + folder decls. Legacy files (no prologue markers) keep the
+    # whole region in ``user_prefix`` and leave ``user_prologue`` empty.
+    user_prologue, prologue_body, has_prologue_markers = _split_prologue(user_prefix)
+
+    # Outside the managed markers: parse with AST to pull docstring + folder
+    # decls. ``managed_body`` is parsed only for plugin entries. The folder
+    # decls and docstring come from the prologue body (or the whole prefix on
+    # legacy files) - never from ``user_prologue``, so a user-authored
+    # ``plugins_X = ...`` assignment above the prologue is left verbatim and
+    # not mistaken for a managed folder decl.
+    decl_source = prologue_body if has_prologue_markers else user_prefix
+    prefix_tree = ast.parse(decl_source) if decl_source.strip() else ast.Module(body=[], type_ignores=[])
 
     docstring = ast.get_docstring(prefix_tree) or ""
 
@@ -192,12 +228,20 @@ def _parse_source(source: str) -> LoadoutModel:
     declared = {f.var for f in folders}
     plugins = [entry for entry in plugins if entry.folder_var in declared]
 
+    # When prologue markers ARE present the head is fully structured
+    # (user_prologue + regenerable folders/docstring), so ``user_prefix`` is
+    # cleared - render rebuilds the prologue from ``folders``. When they are
+    # ABSENT (legacy file) the whole head rides verbatim in ``user_prefix``,
+    # exactly as before, so nothing is lost on a file NSL has not re-saved yet.
+    parsed_user_prefix = "" if has_prologue_markers else user_prefix
+
     return LoadoutModel(
         docstring=docstring,
         folders=folders,
         plugins=plugins,
-        user_prefix=user_prefix,
+        user_prefix=parsed_user_prefix,
         user_suffix=user_suffix,
+        user_prologue=user_prologue,
     )
 
 
@@ -228,6 +272,41 @@ def _find_marker_line(lines: list[str], *markers: str) -> Optional[int]:
         if line.rstrip("\r\n").strip() in markers:
             return idx
     return None
+
+
+def _split_prologue(prefix: str) -> tuple[str, str, bool]:
+    """Split the pre-MANAGED region into (user_prologue, prologue_body, found).
+
+    ``prefix`` is everything above the ``BEGIN_MARKER``. When it carries the
+    NSL prologue markers, return:
+
+      * ``user_prologue`` - hand-authored text ABOVE the BEGIN-prologue marker,
+        kept verbatim on render,
+      * ``prologue_body`` - the NSL-owned head BETWEEN the prologue markers
+        (parsed for docstring + folder decls, regenerated on render),
+      * ``True``.
+
+    Any text BELOW the END-prologue marker (between it and BEGIN_MARKER) is
+    appended onto ``prologue_body`` so its folder decls still parse; it is
+    rare (NSL never writes there) and regenerating the prologue subsumes it.
+
+    When the prologue markers are absent (legacy file, or a file the user
+    stripped them from) return ``("", "", False)`` and the caller treats the
+    whole ``prefix`` as one verbatim blob - no behaviour change for old files.
+    """
+    lines = prefix.splitlines(keepends=True)
+    begin_idx = _find_marker_line(lines, BEGIN_PROLOGUE_MARKER)
+    end_idx = _find_marker_line(lines, END_PROLOGUE_MARKER)
+
+    if begin_idx is None or end_idx is None or end_idx <= begin_idx:
+        return "", "", False
+
+    user_prologue = "".join(lines[:begin_idx])
+    body = "".join(lines[begin_idx + 1 : end_idx])
+    trailing = "".join(lines[end_idx + 1 :])
+    if trailing.strip():
+        body = f"{body}{trailing}"
+    return user_prologue, body, True
 
 
 def _try_folder_decl(node: ast.AST) -> Optional[FolderDecl]:
@@ -407,23 +486,48 @@ def _scan_trailing_comments(source: str) -> dict[int, str]:
 def render(model: LoadoutModel) -> str:
     """Render the model to canonical text.
 
-    When ``user_prefix`` is non-empty it's used verbatim as the file head
-    (the user authored it; NSL only ever appended folder vars + helper
-    there originally). When empty, we synthesize a canonical prefix from
-    ``folders`` + helper def.
+    The file head is built in this order of precedence:
+
+    * ``user_prefix`` non-empty (legacy file NSL has not re-saved): emit it
+      verbatim, exactly as before. This branch round-trips an old file
+      untouched and never appears on a model NSL itself just built.
+    * otherwise: emit any hand-authored ``user_prologue`` verbatim, then a
+      freshly synthesised NSL prologue (imports + folder vars + helper)
+      wrapped in the prologue markers. Regenerating from ``folders`` keeps
+      the ``plugins_X`` vars in lockstep with the managed block (no dangling
+      reference) while the user's own prologue text survives every rebuild.
     """
     if model.user_prefix:
         prefix = model.user_prefix
         if not prefix.endswith("\n"):
             prefix = f"{prefix}\n"
     else:
-        prefix = _render_canonical_prefix(model)
+        prefix = _render_prologue(model)
 
     managed = _render_managed_block(model)
 
     suffix = model.user_suffix
 
     return f"{prefix}{BEGIN_MARKER}\n{managed}{END_MARKER}\n{suffix}"
+
+
+def _render_prologue(model: LoadoutModel) -> str:
+    """Hand-authored ``user_prologue`` (verbatim) + the marked NSL head.
+
+    The NSL head (imports + folder vars + helper) is wrapped in the prologue
+    markers so a later parse can peel it back off and the user's own text
+    above it survives. ``user_prologue`` is emitted first, verbatim.
+    """
+    parts: list[str] = []
+    prologue = model.user_prologue
+    if prologue:
+        if not prologue.endswith("\n"):
+            prologue = f"{prologue}\n"
+        parts.append(prologue)
+    parts.append(f"{BEGIN_PROLOGUE_MARKER}\n")
+    parts.append(_render_canonical_prefix(model))
+    parts.append(f"{END_PROLOGUE_MARKER}\n")
+    return "".join(parts)
 
 
 def _render_canonical_prefix(model: LoadoutModel) -> str:
@@ -597,17 +701,25 @@ def sync_folders(
             continue  # folder removed from canonical - prune this entry
         new_plugins.append(replace(entry, folder_var=new_var))
 
-    # Reset user_prefix so render() rebuilds a canonical prefix from the NEW
+    # Reset user_prefix so render() rebuilds the NSL prologue from the NEW
     # folder decls. Without this, render() emits the stale user_prefix
-    # verbatim (folder decls live there on round-trip), leaving the managed
-    # block referencing vars the prefix no longer declares - a dangling
-    # reference. Mirrors folder_ops._with_folders, which resets user_prefix
-    # for the same reason; the docstring is preserved via model.docstring.
+    # verbatim (folder decls live there on a legacy round-trip), leaving the
+    # managed block referencing vars the prefix no longer declares - a
+    # dangling reference. Mirrors folder_ops._with_folders, which resets
+    # user_prefix for the same reason; the docstring is preserved via
+    # model.docstring.
+    #
+    # ``user_prologue`` is carried forward verbatim: it is the hand-authored
+    # text that lives ABOVE the NSL prologue markers (custom imports/helpers),
+    # NOT part of the regenerated head, so a folder add/remove must not drop
+    # it (Issue 2 - the old code zeroed only user_prefix and silently lost
+    # this text because legacy parses folded both into user_prefix).
     return replace(
         model,
         folders=[*canonical, *global_decls],
         plugins=new_plugins,
         user_prefix="",
+        user_prologue=model.user_prologue,
     )
 
 
