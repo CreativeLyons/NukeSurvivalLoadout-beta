@@ -865,22 +865,27 @@ class Registry:
         reorder (including while Custom is active), after undo / redo
         of a folder op, and on Revert when the folder baseline differs.
 
-        panic + active are read back from the on-disk dispatcher and
-        left untouched (only ``folders`` is rewritten), so this is
-        independent of when ``self.state`` settles and never writes
-        ``Custom`` as the active pointer (Custom is in-memory only -
-        the dispatcher keeps the last real loadout).
+        panic + active come from the in-memory :attr:`state` (the
+        bootstrap-normalised, op-synced mirror), NOT a fresh re-read of
+        disk. Re-reading disk was the resurrection bug: the bootstrap
+        normalises a stale ``ACTIVE_LOADOUT="Custom"`` pointer to "" in
+        memory, but a disk re-read here pulled the unchanged ``Custom``
+        back and wrote it out again. Writing ``self.state`` carries the
+        normalisation through; the Custom slot is additionally coerced to
+        "" below as a belt. ``panic`` and the last real active loadout are
+        preserved (Issue 14).
         ``sync_folders_to_loadouts`` fans the canonical decls into each
-        loadout file, remapping plugin entries by PATH so reorders stay
-        correct. That fan-out runs BEFORE the dispatcher write and is
-        transactional: it stages + validates every loadout, rolls back any
-        already-written files and re-raises on a mid-stream write failure,
-        and reports loadouts it had to skip (unreadable / malformed) via
-        ``result.skipped`` - which is logged prominently here rather than
-        silently swallowed. Committing the dispatcher only after a clean
+        loadout file BEFORE the dispatcher write and is transactional: it
+        stages + validates every loadout, rolls back already-written files
+        and re-raises on a mid-stream write failure, and reports skipped
+        (unreadable / malformed) loadouts via ``result.skipped`` - logged
+        prominently here. Committing the dispatcher only after a clean
         fan-out keeps the folder authority from advancing past a stale
-        suffix of loadouts.
+        suffix of loadouts (Issue 13).
         """
+        from dataclasses import replace
+
+        from NukeSurvivalLoadout.constants import DEFAULT_CUSTOM_LOADOUT_STEM
         from NukeSurvivalLoadout.boot.dispatcher import (
             read_dispatcher,
             write_dispatcher,
@@ -898,13 +903,12 @@ class Registry:
             for i, path in enumerate(dirs)
         ]
 
-        # Fan out into the loadouts FIRST, then advance the dispatcher. The
-        # fan-out stages + validates every loadout before writing any, and on
-        # a mid-stream write failure it rolls the already-written files back
-        # and re-raises. Committing the dispatcher only after that succeeds
-        # keeps the authority (dispatcher folder set) from advancing past the
-        # loadouts: a failure leaves dispatcher AND loadouts on the old set,
-        # not the dispatcher ahead of a stale suffix of loadouts.
+        # Fan out into the loadouts FIRST, then advance the dispatcher
+        # (Issue 13). The fan-out stages + validates every loadout before
+        # writing any, and on a mid-stream write failure rolls the
+        # already-written files back and re-raises. Committing the dispatcher
+        # only after that succeeds keeps the authority from advancing past a
+        # stale suffix of loadouts.
         result = sync_folders_to_loadouts(loadouts_dir, canonical)
         if result.skipped:
             for stem, reason in result.skipped:
@@ -914,9 +918,19 @@ class Registry:
                     reason,
                 )
 
-        state = read_dispatcher(dispatcher)
-        state.folders = canonical
-        write_dispatcher(dispatcher, state)
+        # Base the dispatcher write on the in-memory normalised state when
+        # present (Issue 14) - a fresh disk re-read resurrected a stale
+        # ``Custom`` pointer. Fall back to a disk read only for degraded
+        # fixtures with no state (tests / headless). Never persist the
+        # in-memory-only ``Custom`` wildcard as the active pointer.
+        base_state = getattr(self, "state", None)
+        if base_state is None:
+            base_state = read_dispatcher(dispatcher)
+        active = base_state.active
+        if active == DEFAULT_CUSTOM_LOADOUT_STEM:
+            active = ""
+        write_state = replace(base_state, active=active, folders=canonical)
+        write_dispatcher(dispatcher, write_state)
         if getattr(self, "state", None) is not None:
             self.state.folders = list(canonical)
 
