@@ -37,10 +37,12 @@ PathLike = Union[str, "os.PathLike[str]"]
 class Plugin:
     """A Plugin discovered by a scan of a Plugins Folder.
 
-    `name` is the Plugin Name (spaces resolved to underscores; case preserved
-    otherwise). `folder_name` is the original on-disk folder basename,
-    preserved byte-exact. `path` is the absolute path to the folder. `source`
-    is the Plugins Folder that owned this Plugin in this scan (absolute path).
+    `name` is the Plugin Name: the on-disk folder basename, byte-exact (no
+    normalization - see :func:`_resolve_plugin_name`). `folder_name` is the
+    same byte-exact basename, retained as an explicit alias for call sites that
+    address the folder on disk. `path` is the absolute path to the folder.
+    `source` is the Plugins Folder that owned this Plugin in this scan
+    (absolute path).
 
     The value object intentionally carries no Loadout state (enabled /
     gui_only); resolution of effective state lives downstream.
@@ -84,8 +86,23 @@ def _is_ignored_folder(folder_name: str) -> bool:
 
 
 def _resolve_plugin_name(folder_name: str) -> str:
-    """Resolve a folder name to a Plugin Name: spaces become underscores."""
-    return folder_name.replace(" ", "_")
+    """Resolve a folder name to a Plugin Name: the byte-exact basename.
+
+    The Plugin Name is the on-disk folder basename, unchanged. We deliberately
+    do NOT normalize (e.g. spaces -> underscores): the name is used downstream
+    to address the folder on disk - ``os.path.join(folder, name)`` and the
+    ``(folder, name)`` dedup tuple in both the per-loadout helper
+    (``_HELPER_DEF``) and the global loader. Those compare against the real
+    basenames returned by ``os.listdir``, so any normalization here forks the
+    plugin's identity: an explicit Disable / GUI-only on a space-named folder
+    would target a path that does not exist and fail to suppress the folder
+    sweep, silently reverting the user's decision at next boot. Normalization
+    also collapsed ``My Plugin`` and ``My_Plugin`` into one key, hiding a
+    plugin. The name is always rendered with ``repr()`` in generated code, so a
+    space is syntactically safe. Keep this seam identity; do not re-add
+    normalization without solving the on-disk identity problem first.
+    """
+    return folder_name
 
 
 def _has_content(folder_path: Path) -> bool:
