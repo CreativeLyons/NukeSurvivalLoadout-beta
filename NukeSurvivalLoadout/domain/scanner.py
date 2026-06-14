@@ -28,7 +28,7 @@ from NukeSurvivalLoadout.constants import (
     PLUGIN_NON_CONTENT_FILE_PREFIX,
 )
 
-__all__ = ["Plugin", "scan_folder"]
+__all__ = ["Plugin", "plugin_folder_has_content", "scan_folder"]
 
 PathLike = Union[str, "os.PathLike[str]"]
 
@@ -67,7 +67,7 @@ def _is_naming_rule_valid(folder_name: str) -> bool:
     The real filtering still happens - just not here:
       * junk / hidden dirs (``.git``, ``__pycache__``, anything starting
         with ``_`` or ``.``) → :func:`_is_ignored_folder`.
-      * empty folders → :func:`_has_content`.
+      * empty folders → :func:`plugin_folder_has_content`.
 
     So this guard only rejects a literally empty name (which a real directory
     entry can never have).
@@ -105,8 +105,16 @@ def _resolve_plugin_name(folder_name: str) -> str:
     return folder_name
 
 
-def _has_content(folder_path: Path) -> bool:
-    """Report whether a folder has meaningful content.
+def plugin_folder_has_content(folder_path: PathLike) -> bool:
+    """Report whether a Plugin folder has meaningful content.
+
+    This is the ONE canonical "is this Plugin folder non-empty" predicate.
+    Both Plugin discovery (:func:`scan_folder`) and folder health
+    classification (``folder_ops.health_check``) call it, so the two cannot
+    drift on what counts as content - in particular on the symlink policy
+    below. (Issue 18: ``health_check`` previously used
+    ``follow_symlinks=False`` and reported a folder of symlinked plugins
+    EMPTY even though those plugins appeared in the grid.)
 
     A folder is considered empty if it contains no files, or only files that
     don't count as content. Files starting with `.` (dot) and `Thumbs.db` do
@@ -117,8 +125,8 @@ def _has_content(folder_path: Path) -> bool:
     is treated as having meaningful content.
     """
     try:
-        entries = list(os.scandir(folder_path))
-    except (FileNotFoundError, PermissionError, NotADirectoryError):
+        entries = list(os.scandir(os.fspath(folder_path)))
+    except (FileNotFoundError, PermissionError, NotADirectoryError, OSError):
         return False
 
     for entry in entries:
@@ -208,7 +216,7 @@ def scan_folder(path: PathLike) -> List[Plugin]:
 
         # Skip empty folders.
         entry_path = Path(entry.path)
-        if not _has_content(entry_path):
+        if not plugin_folder_has_content(entry_path):
             continue
 
         # Spaces resolve to underscores in the Plugin Name.
