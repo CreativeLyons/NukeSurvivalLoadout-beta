@@ -92,6 +92,150 @@ def _chain_loadout_path(registry, stem: str) -> Path:
     return Path(registry.loadouts_dir) / stem / "init.py"
 
 
+def _user_folder_entries(
+    folders: list[FolderDecl],
+    active_plugins: dict,
+    discovered: dict,
+    base_entries: list[ChainPluginEntry],
+    base_folder_paths: dict[str, str],
+) -> list[ChainPluginEntry]:
+    """Build the user-folder exception lines for the managed block.
+
+    Pure (no ``nuke`` / Qt). UNION of two sources, scoped to the
+    STILL-CONFIGURED folders in ``folders``:
+
+    1. **Live scan** - every discovered plugin whose ``source`` matches a
+       configured folder's path and whose decision in ``active_plugins``
+       DIVERGES from the default (disabled / gui-only). Default-on plugins
+       emit no line (``nsl_load_folder`` scan-loads them at boot). This is
+       the historical behaviour.
+
+    2. **Carried deviations** - any on-disk exception line in
+       ``base_entries`` whose plugin is ABSENT from the live scan but whose
+       source folder IS still configured (e.g. an unmounted share that was
+       momentarily unscannable at Save). Without this, an explicit
+       Disabled / GUI-only decision for such a plugin is silently dropped
+       and the folder sweep reloads it default-on at next boot.
+
+    The deviation's decision is re-resolved against ``active_plugins`` so an
+    in-memory toggle-back-to-default still drops the line; an absent active
+    entry falls back to the on-disk deviation verbatim. Folder identity is
+    the PATH (canon-compared), not the var name, so a reorder that shifts
+    which path a ``plugins_X`` var holds still maps each carried deviation
+    to the right configured folder. De-duped so a plugin present in BOTH
+    the scan and the on-disk file does not double-emit. A deviation whose
+    source folder is no longer configured is dropped (genuinely-removed
+    folders still prune - the Issue 4 interaction).
+
+    Mirrors the Global branch, which already reads names from the model
+    (``global_model.plugins``) rather than the live scan.
+    """
+    # Map each configured folder's canon path -> its current var, and keep a
+    # per-var record of which plugin names the live scan already emitted so
+    # the carried-deviation pass can de-dup against them.
+    path_to_var: dict[str, str] = {
+        canon_for_compare(decl.path): decl.var for decl in folders
+    }
+    configured_canon = set(path_to_var.keys())
+
+    new_entries: list[ChainPluginEntry] = []
+    emitted_per_var: dict[str, set] = {}
+
+    # 1. Live scan: discovered plugins per configured folder (current path).
+    for decl in folders:
+        names = sorted(
+            plugin_name
+            for plugin_name, plugin in discovered.items()
+            if canon_for_compare(getattr(plugin, "source", "") or "")
+            == canon_for_compare(decl.path)
+        )
+        seen = emitted_per_var.setdefault(decl.var, set())
+        for plugin_name in names:
+            decision = active_plugins.get(plugin_name)
+            if decision is None:
+                continue  # no explicit decision -> default on -> scan loads it
+            disabled = not decision.enabled
+            gui = decision.gui_only
+            if not (disabled or gui):
+                continue  # explicit but equals default -> still scan-loaded
+            seen.add(plugin_name)
+            existing = _base_entry_for(base_entries, plugin_name, decl.var)
+            new_entries.append(
+                ChainPluginEntry(
+                    folder_var=decl.var,
+                    name=plugin_name,
+                    gui=gui,
+                    disabled=disabled,
+                    trailing_comment=(
+                        existing.trailing_comment if existing else ""
+                    ),
+                )
+            )
+
+    # 2. Carried deviations: on-disk exception lines whose plugin is absent
+    #    from the live scan but whose source folder is still configured.
+    for entry in base_entries:
+        if entry.folder_var == GLOBAL_PLUGINS_VAR_NAME:
+            continue  # Global overrides are handled by the global branch
+        if entry.name in discovered:
+            continue  # scan saw it -> pass 1 already decided its fate
+        base_path = base_folder_paths.get(entry.folder_var)
+        if base_path is None:
+            continue  # on-disk var no longer declared (defensive)
+        canon_path = canon_for_compare(base_path)
+        if canon_path not in configured_canon:
+            continue  # folder removed from config -> prune the deviation
+        target_var = path_to_var[canon_path]
+        seen = emitted_per_var.setdefault(target_var, set())
+        if entry.name in seen:
+            continue  # already emitted (path matched a discovered plugin)
+        # Re-resolve the decision against the in-memory active model: an
+        # explicit toggle-back-to-default drops the line; an absent active
+        # entry keeps the on-disk deviation verbatim.
+        decision = active_plugins.get(entry.name)
+        if decision is None:
+            disabled = entry.disabled
+            gui = entry.gui
+        else:
+            disabled = not decision.enabled
+            gui = decision.gui_only
+        if not (disabled or gui):
+            continue  # deviation was reverted to default in memory
+        seen.add(entry.name)
+        new_entries.append(
+            ChainPluginEntry(
+                folder_var=target_var,
+                name=entry.name,
+                gui=gui,
+                disabled=disabled,
+                trailing_comment=entry.trailing_comment,
+            )
+        )
+
+    return new_entries
+
+
+def _base_entry_for(
+    base_entries: list[ChainPluginEntry], name: str, folder_var: str
+) -> Optional[ChainPluginEntry]:
+    """First on-disk entry matching ``name`` - preferring ``folder_var``.
+
+    Used only to recover a trailing comment for a discovered (pass-1)
+    plugin. The folder-var preference keeps a comment attached to the
+    right line when the same plugin name legitimately appears under two
+    different folder vars on disk.
+    """
+    fallback: Optional[ChainPluginEntry] = None
+    for entry in base_entries:
+        if entry.name != name:
+            continue
+        if entry.folder_var == folder_var:
+            return entry
+        if fallback is None:
+            fallback = entry
+    return fallback
+
+
 def _build_chain_model(
     registry,
     stem: str,
@@ -132,13 +276,18 @@ def _build_chain_model(
     zeroed user_prefix and, because a legacy parse folded the prologue text
     into it, silently discarded any custom import/helper above the markers).
     """
-    # On-disk model - read solely to preserve trailing comments on calls.
+    # On-disk model - read to preserve trailing comments AND to carry
+    # forward deviations whose plugin is momentarily unscannable (offline
+    # share). One entry-per-name lookup feeds the Global branch below.
     target = _chain_loadout_path(registry, stem)
     try:
         base_model = read_chain_loadout(str(target))
     except (OSError, SyntaxError):
         base_model = LoadoutModel()
     on_disk_by_name = {entry.name: entry for entry in base_model.plugins}
+    # On-disk var -> path, so a carried deviation's folder_var resolves to
+    # its real folder even after a reorder shuffled the index-based vars.
+    base_folder_paths = {decl.var: decl.path for decl in base_model.folders}
 
     # One FolderDecl per configured user plugin folder, in configured order.
     user_dirs = list(getattr(registry, "user_plugin_dirs", []) or [])
@@ -150,34 +299,17 @@ def _build_chain_model(
     active_plugins = active_model.plugins if active_model is not None else {}
     discovered = getattr(registry, "discovered_plugins", {}) or {}
 
-    # Emit folder-by-folder so the managed block groups cleanly; within a
-    # folder, sort by name for stable, diff-friendly output. Only EXCEPTIONS
-    # (disabled / gui-only) get a line; default-on plugins are scan-loaded.
-    new_plugins: list[ChainPluginEntry] = []
-    for decl in folders:
-        names = sorted(
-            plugin_name
-            for plugin_name, plugin in discovered.items()
-            if getattr(plugin, "source", None) == decl.path
-        )
-        for plugin_name in names:
-            decision = active_plugins.get(plugin_name)
-            if decision is None:
-                continue  # no explicit decision -> default on -> scan loads it
-            disabled = not decision.enabled
-            gui = decision.gui_only
-            if not (disabled or gui):
-                continue  # explicit but equals default -> still scan-loaded
-            existing = on_disk_by_name.get(plugin_name)
-            new_plugins.append(
-                ChainPluginEntry(
-                    folder_var=decl.var,
-                    name=plugin_name,
-                    gui=gui,
-                    disabled=disabled,
-                    trailing_comment=existing.trailing_comment if existing else "",
-                )
-            )
+    # User-folder exception lines: UNION of the live scan with any on-disk
+    # deviation whose plugin is offline-but-still-configured. Scoped to the
+    # still-configured folders so removed folders still prune. See
+    # :func:`_user_folder_entries`.
+    new_plugins: list[ChainPluginEntry] = _user_folder_entries(
+        folders=folders,
+        active_plugins=active_plugins,
+        discovered=discovered,
+        base_entries=base_model.plugins,
+        base_folder_paths=base_folder_paths,
+    )
 
     # Global-plugin overrides: one entry per divergence from the resolved
     # Global model, under the ``global_plugins`` var. Declared only when
