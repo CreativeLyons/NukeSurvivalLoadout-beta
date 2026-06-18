@@ -5,7 +5,13 @@ All notable changes to Nuke Survival Loadout are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-06-18
+
+### Added
+
+- Initial beta release: Loadout Panel for saving, naming, and switching
+  between loadouts of enabled Plugins, with plain-Python loadout files,
+  panic mode, and a Global layer for studio/TD shared baselines.
 
 ### Fixed
 
@@ -55,14 +61,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would execute the script rather than open it.
 - Saving is more robust on Windows: the atomic file replace retries
   briefly through transient antivirus/indexer locks, deleting a
-  loadout clears the read-only attribute where needed, and a rename,
-  delete, or duplicate the filesystem refuses now surfaces as a panel
-  message instead of a raw traceback.
-
-## [0.1.0] - 2026-06-12
-
-### Added
-
-- Initial release: Loadout Panel for saving, naming, and switching
-  between loadouts of enabled Plugins, with plain-Python loadout files,
-  panic mode, and a Global layer for studio/TD shared baselines.
+  loadout clears the read-only attribute where needed, and refused
+  rename, delete, or duplicate operations are handled as structured
+  filesystem errors instead of raw tracebacks.
