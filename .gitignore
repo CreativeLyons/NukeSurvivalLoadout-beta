@@ -4,6 +4,7 @@
 .claude/
 .codex/
 .cursor/
+.code-review/
 CLAUDE.md
 AGENTS.md
 Knowledge/
