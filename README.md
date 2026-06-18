@@ -4,6 +4,8 @@ A Loadout Panel for Foundry Nuke that lets compositors and TDs name, save, and s
 
 Each loadout is a small, plain-Python file you can open in any text editor. If a bad Plugin ever stops Nuke from starting, you can disable it by hand and recover without the panel.
 
+![Nuke Survival Loadout panel](img/NSL_Loadout_Panel.jpeg)
+
 **At a glance**
 
 - Save and switch between named Loadouts of enabled Plugins
@@ -27,6 +29,16 @@ Each loadout is a small, plain-Python file you can open in any text editor. If a
 That single `pluginAddPath` is the whole install. NSL creates `~/.nuke/loadouts/` automatically the first time you open the panel.
 
 Supported Nuke versions: **Nuke 13 and later**
+
+## Folder layout
+
+```
+NukeSurvivalLoadout/
+├── init.py          # Nuke boot entrypoint
+├── menu.py          # Nuke UI entrypoint
+├── nsl/             # implementation package
+└── Global/          # optional studio-wide baseline
+```
 
 ---
 

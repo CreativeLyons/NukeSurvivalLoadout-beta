@@ -10,8 +10,8 @@ That makes Nuke's NUKE_PATH walker run this file. From here NSL:
   2. Calls ``nuke.pluginAddPath`` on ``~/.nuke/loadouts`` iff a
      dispatcher ``init.py`` already exists there - that hands control
      to the dispatcher on a later NUKE_PATH pass.
-  3. Calls ``nuke.pluginAddPath`` on ``<repo>/Global`` iff a chain head
-     ``init.py`` exists there. The Global layer is the baseline and must
+  3. Calls ``nuke.pluginAddPath`` on ``<install>/Global`` iff a chain
+     head ``init.py`` exists there. The Global layer is the baseline and must
      EXECUTE first; ``pluginAddPath`` prepends to the remaining scan
      queue (last-added runs first, verified on Nuke 16.0v9), so Global
      is added AFTER the loadouts dir to run BEFORE it.
@@ -36,28 +36,28 @@ import sys
 import nuke  # noqa: F401 - Nuke injects this at runtime
 
 
-_NSL_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _NSL_REPO_ROOT not in sys.path:
-    sys.path.insert(0, _NSL_REPO_ROOT)
+_NSL_INSTALL_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _NSL_INSTALL_ROOT not in sys.path:
+    sys.path.insert(0, _NSL_INSTALL_ROOT)
 
-from NukeSurvivalLoadout.boot.version_gate import check_nuke_version  # noqa: E402
-from NukeSurvivalLoadout.boot.sequence import run_boot_sequence  # noqa: E402
+from nsl.boot.version_gate import check_nuke_version  # noqa: E402
+from nsl.boot.sequence import run_boot_sequence  # noqa: E402
 
 
 def _loadouts_dir() -> str:
     # Routed through constants so the HOME-first resolution (Nuke's own
     # ~/.nuke lookup on Windows) has exactly one implementation. Lazy
     # import, matching _global_dir below - the sys.path insert above
-    # must run before any NukeSurvivalLoadout import.
-    from NukeSurvivalLoadout.constants import loadouts_dir
+    # must run before any nsl import.
+    from nsl.constants import loadouts_dir
 
     return str(loadouts_dir())
 
 
 def _global_dir() -> str:
-    from NukeSurvivalLoadout.constants import GLOBAL_FOLDER_NAME
+    from nsl.constants import global_dir
 
-    return os.path.join(_NSL_REPO_ROOT, GLOBAL_FOLDER_NAME)
+    return str(global_dir())
 
 
 def _run() -> None:

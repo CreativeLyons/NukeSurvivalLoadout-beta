@@ -9,9 +9,9 @@ Nuke's ``Edit`` menu (the same area as Preferences), bound to ``F11``.
 Clicking the entry (or pressing F11) constructs (or re-shows) a singleton
 :class:`_LoadoutPanelHost` widget as a **non-modal floating window** -
 NOT a docked Nuke pane. The host wraps the production
-:class:`NukeSurvivalLoadout.ui.panel.LoadoutPanel`, building the production
+:class:`nsl.ui.panel.LoadoutPanel`, building the production
 :class:`Registry` from disk + env state at construct time via
-:func:`NukeSurvivalLoadout.ui.registry_bootstrap.build_registry_for_panel`.
+:func:`nsl.ui.registry_bootstrap.build_registry_for_panel`.
 
 NSL does not manually exec plugin menu.py files. Nuke's native NUKE_PATH
 walker handles menu.py discovery the same way it handles init.py - once a
@@ -29,16 +29,22 @@ usage pattern and sidesteps the docked-panel registration plumbing
 
 from __future__ import annotations
 
+import importlib.util
+import os
 import sys
 import traceback
 
+_NSL_INSTALL_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _NSL_INSTALL_ROOT not in sys.path:
+    sys.path.insert(0, _NSL_INSTALL_ROOT)
+
 import nuke  # noqa: F401 - Nuke injects this at runtime
 
-from NukeSurvivalLoadout.boot.version_gate import check_nuke_version
-from NukeSurvivalLoadout.compat import QtWidgets
-from NukeSurvivalLoadout.constants import loadouts_dir
-from NukeSurvivalLoadout.ui.panel import LoadoutPanel
-from NukeSurvivalLoadout.ui.registry_bootstrap import build_registry_for_panel
+from nsl.boot.version_gate import check_nuke_version
+from nsl.compat import QtWidgets
+from nsl.constants import loadouts_dir
+from nsl.ui.panel import LoadoutPanel
+from nsl.ui.registry_bootstrap import build_registry_for_panel
 
 
 _MENU_PATH = "Nuke"
@@ -53,7 +59,7 @@ _WINDOW_TITLE = "Loadout Panel"
 # (dev only). Either way the panel rebuilds its Registry from disk on open, so
 # the user always sees fresh on-disk state.
 _RELOAD_ON_OPEN = False
-_PACKAGE_PREFIXES = ("NukeSurvivalLoadout", "nsl")
+_PACKAGE_PREFIXES = ("nsl",)
 
 # Singleton instance - survives menu re-invocations so the user's
 # splitter sizes, side-panel tab selection, etc. persist across
@@ -135,7 +141,7 @@ class _LoadoutPanelHost(LoadoutPanel):
             return
         # Import here (not at module load) so menu.py stays importable in
         # the no-Qt test stub path; events pulls in the UI wiring layer.
-        from NukeSurvivalLoadout.ui.wiring import events as _events
+        from nsl.ui.wiring import events as _events
 
         try:
             proceed = _events.should_close_panel(self)
@@ -180,7 +186,7 @@ def _reload_and_show() -> None:
     """Drop NSL modules, re-import fresh, and show the panel.
 
     The live-iteration path: tears down any open panel, removes every
-    ``NukeSurvivalLoadout.*`` / ``nsl.*`` module from ``sys.modules``,
+    ``nsl.*`` module from ``sys.modules``,
     re-imports this module fresh, and shows via the re-imported
     ``_show_loadout_panel`` so the reload path and the menu path stay
     identical. Resilient: a mid-reload failure prints a full traceback and
@@ -191,7 +197,7 @@ def _reload_and_show() -> None:
         # Close any live panel. Walk top-levels by title so a stale
         # _panel_instance reference cannot leave an orphan window behind.
         try:
-            from NukeSurvivalLoadout.compat import QtWidgets
+            from nsl.compat import QtWidgets
 
             app = QtWidgets.QApplication.instance()
             if app is not None:
@@ -210,7 +216,11 @@ def _reload_and_show() -> None:
             if mod_name.split(".")[0] in _PACKAGE_PREFIXES:
                 del sys.modules[mod_name]
 
-        import NukeSurvivalLoadout.menu as _fresh
+        spec = importlib.util.spec_from_file_location("_nsl_menu_reloaded", __file__)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"could not reload menu module from {__file__}")
+        _fresh = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_fresh)
 
         _fresh._show_loadout_panel()
     except BaseException:

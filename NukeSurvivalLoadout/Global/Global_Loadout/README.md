@@ -1,0 +1,1 @@
+Copy your saved Global Loadout here: `~/.nuke/loadouts/Global_Loadout/init.py` goes in this folder. Until then, every plugin folder in `NukeSurvivalLoadout/Global/plugins/` loads. See `NukeSurvivalLoadout/Global/README.md`.

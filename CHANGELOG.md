@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   between loadouts of enabled Plugins, with plain-Python loadout files,
   panic mode, and a Global layer for studio/TD shared baselines.
 
+### Changed
+
+- Release packaging is now self-contained inside the `NukeSurvivalLoadout/`
+  install folder: Nuke entrypoints live at the top level, implementation
+  code lives in `nsl/`, and the Global baseline lives in `Global/`.
+
 ### Fixed
 
 - File IO no longer depends on the host locale. Loadout and dispatcher
