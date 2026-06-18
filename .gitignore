@@ -2,6 +2,8 @@
 # shippable product; everything an end user shouldn't see lives below.
 .plans/
 .claude/
+.codex/
+.cursor/
 CLAUDE.md
 AGENTS.md
 Knowledge/
