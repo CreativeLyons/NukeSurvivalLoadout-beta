@@ -10,7 +10,9 @@ You need to think about 2 things:
 
 Once you have added a plugin directory, save your Loadout, Restart Nuke, and your plugins will load, and the Loadout Panel will reflect what is enabled and disabled in the session.
 
-Each loadout is a small, python init.py file you can open in any text editor. If a bad Plugin ever stops Nuke from starting, you can disable it by hand and recover without the panel just like you would normally in your init.py file if you were loading a plugin from scratch.   The panel is writing a custom init.py for your plugins and pointing Nuke at it. (Note: This is not overwriting your `~/.nuke/init.py`, it is a separate file in `~/.nuke/Loadouts/<loadout-name>/init.py`, so it is in additional to your own init.py, not a replacement.
+Each loadout is a small, python init.py file you can open in any text editor. If a bad Plugin ever stops Nuke from starting, you can disable it by hand and recover without the panel just like you would normally in your init.py file if you were loading a plugin from scratch.   
+
+The panel is writing a custom init.py for your plugins and pointing Nuke at it. (Note: This is not overwriting your `~/.nuke/init.py`, it is a separate file in `~/.nuke/Loadouts/<loadout-name>/init.py`, so it is in additional to your own init.py, not a replacement.
 
 ![Nuke Survival Loadout panel](img/NSL_Loadout_Panel.jpeg)
 
