@@ -1,8 +1,16 @@
 # Nuke Survival Loadout
 
-A Loadout Panel for Foundry Nuke that lets compositors and TDs name, save, and switch between loadouts of enabled Plugins. Drop your Plugins into a folder, point the panel at it, toggle the ones you want loaded, and save the selection as a named Loadout. Restart Nuke and only the Plugins you enabled are added to the NUKEPATH.
+A Loadout Panel for Foundry Nuke that helps compositors manage and load their plugins.
 
-Each loadout is a small, plain-Python file you can open in any text editor. If a bad Plugin ever stops Nuke from starting, you can disable it by hand and recover without the panel.
+You need to think about 2 things:
+
+1. WHERE are the plugins?  Drop all your plugins into 1 big folder, and point the panel at this plugins directory.  You can add as many plugin directories as you want.
+
+2. WHAT plugins do you want to load? The panel will try and load each plugin in that folder by default.  But if you want, you can uncheck any plugins that you do not need.  You can also specify which plugins are "GUI-Only" and only need to be loaded during GUI Nuke and not in a terminal Nuke session or the Render Farm.  Save your selection as a "Loadout", which saves a custom file to `~/.nuke/Loadouts/`.  You can save as many Loadout configurations as you want, for quick switches between groups of tools.
+
+Once you have added a plugin directory, save your Loadout, Restart Nuke, and your plugins will load, and the Loadout Panel will reflect what is enabled and disabled in the session.
+
+Each loadout is a small, python init.py file you can open in any text editor. If a bad Plugin ever stops Nuke from starting, you can disable it by hand and recover without the panel just like you would normally in your init.py file if you were loading a plugin from scratch.   The panel is writing a custom init.py for your plugins and pointing Nuke at it. (Note: This is not overwriting your `~/.nuke/init.py`, it is a separate file in `~/.nuke/Loadouts/<loadout-name>/init.py`, so it is in additional to your own init.py, not a replacement.
 
 ![Nuke Survival Loadout panel](img/NSL_Loadout_Panel.jpeg)
 
