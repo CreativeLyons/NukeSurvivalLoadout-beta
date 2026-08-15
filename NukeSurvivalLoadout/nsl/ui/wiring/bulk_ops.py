@@ -59,8 +59,8 @@ __all__ = ["wire_bulk_ops"]
 
 
 # ---------------------------------------------------------------------------
-# Local shim - implements a single-plugin set/persist on top of the
-# `loadout_ops.save` API, sharing the chain-bridge pattern.
+# Local shim - single-plugin in-memory set, plus the legacy->chain
+# bridge helpers Save uses to persist the result later.
 # ---------------------------------------------------------------------------
 
 
@@ -237,12 +237,13 @@ def _set_plugin_entry(
     global_model: Optional[LoadoutFile] = None,
     registry=None,
 ) -> loadout_ops.OpResult:
-    """Set ``plugin_name`` to ``next_entry`` and persist.
+    """Set ``plugin_name`` to ``next_entry`` in memory (no disk write).
 
     When active is Global, materializes ``Custom`` from the global
     model first and flips the dispatcher pointer to it. Otherwise mutates
-    the active model in place. Returns an ``OpResult`` whose ``model`` field
-    is the **legacy LoadoutFile** so callers can hand it straight to
+    the active model in place. Persistence happens only on an explicit
+    Save. Returns an ``OpResult`` whose ``model`` field is the **legacy
+    LoadoutFile** so callers can hand it straight to
     ``registry.apply_op_result`` (which expects LoadoutFile).
     """
     if is_global_plugin and previous_entry is not None and (
@@ -287,53 +288,28 @@ def _set_plugin_entry(
             blocked=None,
         )
 
-    # Named loadout - mutate. Persist to disk only if the loadout file
-    # already exists on disk; if it doesn't (e.g., Custom synthesized
-    # earlier in this bulk run from Global), stay in-memory per the
-    # ceremonial-save contract - the file only lands on disk when the
-    # user explicitly clicks Save (or Save As) on Custom.
+    # Named loadout - mutate IN MEMORY ONLY, whether or not the
+    # loadout's init.py already exists on disk. This matches the
+    # single-pill contract (``events._toggle_plugin`` also returns
+    # ``path=None``): a bulk edit marks the loadout dirty and persists
+    # only on an explicit Save.
+    #
+    # ``path=None`` is load-bearing. ``registry.apply_op_result`` treats
+    # a non-None path as proof that disk == memory and advances the
+    # saved baseline, so writing here made every bulk edit instantly
+    # "already saved" - ``is_active_dirty`` went False and the Save
+    # button never unlocked. It also desynced undo: undo replays in
+    # memory only, so disk kept the bulk result while memory reverted,
+    # and a restart resurrected the reverted change.
     existing = dict(active_model.plugins) if active_model is not None else {}
     existing[plugin_name] = next_entry
     new_legacy = LoadoutFile(name=state.active, plugins=existing)
 
-    init_path = _chain_loadout_init_path(Path(loadouts_dir), state.active)
-    if not init_path.is_file():
-        return loadout_ops.OpResult(
-            path=None,
-            model=new_legacy,  # type: ignore[arg-type]
-            state=state,
-            blocked=None,
-        )
-
-    try:
-        chain_model = _build_chain_from_legacy(
-            Path(loadouts_dir), state.active, new_legacy, registry
-        )
-    except _UnroutablePlugin as exc:
-        # A brand-new exception whose source maps to no configured folder.
-        # Block the item rather than misrouting it into the first folder
-        # (where it would miss at boot and the correct sweep would load it
-        # default-on). Nothing on disk changed.
-        return loadout_ops.OpResult(
-            path=None,
-            model=active_model,  # type: ignore[arg-type]
-            state=state,
-            blocked=loadout_ops.Blocked(
-                code=loadout_ops.BlockedReason.SOURCE_NOT_FOUND,
-                detail=(
-                    f"Plugin '{exc.plugin_name}' source does not map to any "
-                    "configured Plugins Folder; refusing to misroute."
-                ),
-            ),
-        )
-    save_result = loadout_ops.save(
-        Path(loadouts_dir), state.active, chain_model, state
-    )
     return loadout_ops.OpResult(
-        path=save_result.path,
+        path=None,
         model=new_legacy,  # type: ignore[arg-type]
-        state=save_result.state,
-        blocked=save_result.blocked,
+        state=state,
+        blocked=None,
     )
 
 
