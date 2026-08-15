@@ -48,7 +48,7 @@ QtWidgets = compat.QtWidgets
 
 
 class SortMode(str, enum.Enum):
-    """The seven sort options, in their **canonical order**.
+    """The eight sort options, in their **canonical order**.
 
     Default is ``A_TO_Z``. The dropdown's display labels are the enum
     *values* (the wording is locked - do not edit casually).
@@ -57,6 +57,7 @@ class SortMode(str, enum.Enum):
     A_TO_Z = "A → Z"  # default
     Z_TO_A = "Z → A"
     STATUS = "Status"
+    GUI_ONLY = "GUI-only"
     SELECTED = "Selected"
     CHANGED_STATE = "Changed state"
     WARNINGS = "Warnings"
@@ -71,6 +72,7 @@ SORT_MODE_ORDER: Tuple[SortMode, ...] = (
     SortMode.A_TO_Z,
     SortMode.Z_TO_A,
     SortMode.STATUS,
+    SortMode.GUI_ONLY,
     SortMode.SELECTED,
     SortMode.CHANGED_STATE,
     SortMode.WARNINGS,
@@ -290,12 +292,19 @@ class PluginsGridToolbar(QtWidgets.QWidget):
         #
         # Visual grouping: divider lines separate semantic clusters in
         # the popup. Alphabetical sits on its own; the rest splits into
-        # "Plugin state" (Status / Changed state / Warnings - what the
-        # pill is) and "User / origin" (Selected / Folder of origin -
-        # how the user got there).
+        # "Plugin state" (Status / GUI-only / Changed state / Warnings -
+        # what the pill is) and "User / origin" (Selected / Folder of
+        # origin - how the user got there). GUI-only sits next to Status
+        # because both describe *how* the plugin loads next restart:
+        # Status is whether it loads at all, GUI-only is where.
         _SORT_GROUPS: Tuple[Tuple[SortMode, ...], ...] = (
             (SortMode.A_TO_Z, SortMode.Z_TO_A),
-            (SortMode.STATUS, SortMode.CHANGED_STATE, SortMode.WARNINGS),
+            (
+                SortMode.STATUS,
+                SortMode.GUI_ONLY,
+                SortMode.CHANGED_STATE,
+                SortMode.WARNINGS,
+            ),
             (SortMode.SELECTED, SortMode.FOLDER_OF_ORIGIN),
         )
         for group_idx, group in enumerate(_SORT_GROUPS):

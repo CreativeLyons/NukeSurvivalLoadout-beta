@@ -1,15 +1,15 @@
 """Per-session sort comparators for the Plugins grid.
 
-Seven sort modes; A -> Z is the universal secondary sort. Sort selection
+Eight sort modes; A -> Z is the universal secondary sort. Sort selection
 is panel-local and per-session and resets on Nuke quit.
 
 This module provides:
 
 * :class:`SortableState` - a tiny dataclass collecting every attribute the
-  seven primary sort axes consult (enabled, selected, pending change,
-  warning, folder priority). The wiring layer (:func:`wire_sort`) builds
-  one of these per pill key by calling the ``state_lookup`` callable
-  installed on the panel.
+  primary sort axes consult (enabled, GUI-only, selected, pending
+  change, warning, folder priority). The wiring layer
+  (:func:`wire_sort`) builds one of these per pill key by calling the
+  ``state_lookup`` callable installed on the panel.
 * :data:`COMPARATORS` - a mode -> key-function table. Each key function
   returns a tuple whose first element is the mode's *primary* sort axis
   and whose final element is the A -> Z secondary axis. ``Z -> A`` is the
@@ -64,13 +64,20 @@ __all__ = [
 class SortableState:
     """The minimum data each pill exposes to the sort axes.
 
-    Six independent axes plus the always-secondary ``name``:
+    Seven independent axes plus the always-secondary ``name``:
 
     * ``name``             - Plugin Name. Drives ``A -> Z`` / ``Z -> A``
       directly and the secondary sort in every other mode. Across all
       sort modes, the secondary sort is always alphabetical A -> Z.
     * ``enabled``          - next-restart enabled state. Drives
       ``Status``: enabled Plugins first.
+    * ``gui_only``         - ``True`` if the pill carries the GUI-only
+      bit (loads only in an interactive Nuke session, skipped in
+      terminal/render). Drives ``GUI-only``: unflagged ("loads
+      everywhere") Plugins first, flagged Plugins grouped below.
+      Read straight off the sparse-diff-resolved entry, so it matches
+      the pill's own GUI chip, which lights purely on ``gui_only``
+      regardless of enabled state.
     * ``selected``         - current selection membership. Drives
       ``Selected``: selected pills first.
     * ``pending``          - ``"green"`` (will-add) / ``"red"`` (will-
@@ -96,6 +103,7 @@ class SortableState:
 
     name: str
     enabled: bool = True
+    gui_only: bool = False
     selected: bool = False
     pending: Optional[str] = None  # "green" | "red" | None
     warning: bool = False
@@ -120,6 +128,10 @@ StateLookup = Callable[[str], SortableState]
 # secondary axis (``name.lower()``). Booleans use the convention
 # ``not flag`` so that ``True`` sorts before ``False`` under ascending
 # sort. Strings already sort ascending without inversion.
+#
+# ``_key_gui_only`` is the deliberate exception - it passes the bare
+# flag so ``False`` (loads everywhere) leads and the GUI-only pills
+# group below. See its docstring for why.
 #
 # These functions consume *only* a :class:`SortableState`. The
 # dispatcher :func:`sort_keys` is the only place the lookup callable is
@@ -146,6 +158,26 @@ def _key_z_to_a(s: SortableState) -> Tuple:
 def _key_status(s: SortableState) -> Tuple:
     """Primary axis: enabled first, then disabled. Secondary A → Z."""
     return (not s.enabled, s.name.lower())
+
+
+def _key_gui_only(s: SortableState) -> Tuple:
+    """Primary axis: loads-everywhere first, then GUI-only. Secondary A → Z.
+
+    Note the inverted convention relative to every other boolean axis
+    in this module: the others use ``not flag`` to float the flagged
+    pills to the top, this one uses the bare flag so the *unflagged*
+    pills lead. GUI-only is the narrower, special-case population -
+    the everyday "loads everywhere" set reads as the baseline and the
+    GUI-only pills collect underneath it as the called-out group.
+
+    Two buckets, split purely on the ``gui_only`` bit. Deliberately
+    independent of ``enabled``: the pill's GUI chip lights on
+    ``gui_only`` alone, so a disabled GUI-only Plugin still groups
+    with its own kind here. ``Status`` is the mode for slicing by
+    enabled, and keeping the two axes orthogonal means picking one
+    never half-answers the other.
+    """
+    return (s.gui_only, s.name.lower())
 
 
 def _key_selected(s: SortableState) -> Tuple:
@@ -209,6 +241,7 @@ COMPARATORS: Dict[SortMode, Callable[[SortableState], Tuple]] = {
     SortMode.A_TO_Z: _key_a_to_z,
     SortMode.Z_TO_A: _key_z_to_a,
     SortMode.STATUS: _key_status,
+    SortMode.GUI_ONLY: _key_gui_only,
     SortMode.SELECTED: _key_selected,
     SortMode.CHANGED_STATE: _key_changed_state,
     SortMode.WARNINGS: _key_warnings,
@@ -237,7 +270,7 @@ def sort_keys(
     Args:
         keys: Iterable of pill keys (typically the grid's current
             full key list, or a filtered subset).
-        mode: One of the seven :class:`SortMode` members.
+        mode: One of the eight :class:`SortMode` members.
         state_lookup: Callable mapping a key to its
             :class:`SortableState`. Called exactly once per key.
 
@@ -309,7 +342,7 @@ def wire_sort(panel) -> None:
         """Permissive lookup used until the real one is installed.
 
         Returns a vanilla :class:`SortableState` whose only non-default
-        axis is the name. Under any of the seven modes, the result is
+        axis is the name. Under any of the eight modes, the result is
         the same alpha-ascending or alpha-descending order - which is
         exactly the right thing before domain wiring: the toolbar still
         re-orders the grid visibly, proving the wire is alive without
@@ -709,6 +742,18 @@ def build_sort_state_lookup(panel) -> StateLookup:
         entry = resolved.plugins.get(key) if resolved is not None else None
         enabled = bool(entry.enabled) if entry is not None else True
 
+        # gui_only - same resolved entry, so the sort bucket and the
+        # pill's GUI chip read the identical sparse-diff result. No
+        # extra registry walk. Absent entry (degraded registry, key not
+        # yet reconciled) falls back to False, matching the implicit
+        # ``PluginEntry(enabled=True, gui_only=False)`` default the
+        # state resolver uses.
+        gui_only = (
+            bool(getattr(entry, "gui_only", False))
+            if entry is not None
+            else False
+        )
+
         # selected - live from the grid. ``selected_keys()`` returns a
         # list copy each call; wrap once in a set for O(1) membership.
         try:
@@ -742,6 +787,7 @@ def build_sort_state_lookup(panel) -> StateLookup:
         return SortableState(
             name=key,
             enabled=enabled,
+            gui_only=gui_only,
             selected=selected,
             pending=pending,
             warning=warning,
@@ -823,6 +869,9 @@ def group_label_for_state(state: SortableState, mode: SortMode) -> Optional[str]
     Vocabulary:
 
     * ``Status``           -> ``"On"`` (enabled) / ``"Off"`` (disabled).
+    * ``GUI-only``         -> ``"Loads everywhere"`` (top group) /
+      ``"GUI-only"`` (below). The first label mirrors the pill's own
+      off-state tooltip, "GUI-only: off, loads everywhere".
     * ``Selected``         -> ``"Selected"`` / ``"Unselected"``.
     * ``Changed state``    -> ``"Pending add"`` / ``"Pending remove"`` /
       ``"Unchanged"``.
@@ -835,6 +884,8 @@ def group_label_for_state(state: SortableState, mode: SortMode) -> Optional[str]
     """
     if mode is SortMode.STATUS:
         return "On" if state.enabled else "Off"
+    if mode is SortMode.GUI_ONLY:
+        return "GUI-only" if state.gui_only else "Loads everywhere"
     if mode is SortMode.SELECTED:
         return "Selected" if state.selected else "Unselected"
     if mode is SortMode.CHANGED_STATE:
