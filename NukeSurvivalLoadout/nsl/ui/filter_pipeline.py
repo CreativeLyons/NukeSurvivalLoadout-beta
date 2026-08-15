@@ -555,6 +555,21 @@ def wire_filter_pipeline(
             # returns True). Lazy import - keeps this module Qt-light.
             from nsl.ui.wiring.events import rewire_grid_pills
             rewire_grid_pills(panel)
+            # Re-push per-pill visual state onto the freshly-minted
+            # pills and cells. ``set_keys`` tears both down; the pill
+            # factory re-mints correct PillStates, but the cell
+            # diff-tint washes and the panic dim exist only through
+            # the panel's push pass - without this, a sort or filter
+            # rebuild wiped them. Skipped during a full registry
+            # refresh, which performs the same push itself right
+            # after this pipeline pass returns.
+            if not getattr(panel, "_in_registry_refresh", False):
+                push = getattr(panel, "_set_pills_from_registry", None)
+                if callable(push):
+                    try:
+                        push()
+                    except Exception:  # noqa: BLE001 - state push must not break the pipeline
+                        pass
         if preserved_selection:
             try:
                 panel.grid.select_keys(preserved_selection)

@@ -1300,16 +1300,63 @@ class LoadoutPanel(QtWidgets.QWidget):
         # reorders pills and must never disturb toggling or pill
         # identity.
         pipeline = getattr(self, "filter_pipeline", None)
-        if pipeline is not None:
-            # Pipeline will call _apply_visibility which calls
-            # set_keys with the filter+sort-composed key list, then
-            # rewires pills.
-            pipeline._recompute_and_apply()
-        elif self.grid.set_keys(new_keys):
-            from nsl.ui.wiring.events import rewire_grid_pills
+        # Guard: _apply_visibility re-pushes pill states after any
+        # rebuild it performs. During a full refresh that push is
+        # redundant - this method pushes right below, against the same
+        # rebuilt grid - so flag the window and let the pipeline skip.
+        self._in_registry_refresh = True
+        try:
+            if pipeline is not None:
+                # Pipeline will call _apply_visibility which calls
+                # set_keys with the filter+sort-composed key list, then
+                # rewires pills.
+                pipeline._recompute_and_apply()
+            elif self.grid.set_keys(new_keys):
+                from nsl.ui.wiring.events import rewire_grid_pills
 
-            rewire_grid_pills(self)
+                rewire_grid_pills(self)
+        finally:
+            self._in_registry_refresh = False
 
+        # Push fresh PillState + cell diff-tints + panic dim onto the
+        # (possibly rebuilt) grid. Extracted to
+        # ``_set_pills_from_registry`` so the filter/sort pipeline can
+        # invoke the same pass after its own rebuilds.
+        self._set_pills_from_registry()
+
+        # Keep top-toolbar Undo/Redo in sync with the active stack on
+        # every refresh, not just wiring-layer ops. Without
+        # this, a registry mutation that bypasses `_toggle_plugin`
+        # (loadout switch, external apply_op_result) leaves the toolbar's
+        # enabled state stale.
+        from nsl.ui.wiring.events import _sync_undo_toolbar
+
+        _sync_undo_toolbar(self)
+
+
+    def _set_pills_from_registry(self) -> None:
+        """Recompose and push per-pill visual state onto the current grid.
+
+        One pass over the visible pills: replay ``pill_state_from`` for
+        every key (body tint, borders, chips), mirror the pending-restart
+        signal onto each cell's diff-tint wash, and re-apply the panic
+        dim. Called from ``refresh_from_registry`` after every registry
+        mutation AND from the filter pipeline's ``_apply_visibility``
+        after any grid rebuild - ``grid.set_keys`` tears down pills and
+        cells, and while the pill factory re-mints correct PillStates,
+        the cell washes and panic opacity exist only through this push.
+        """
+        registry = self.registry
+        if registry is None:
+            return
+        panic_engaged = bool(getattr(registry.state, "panic", False))
+        from nsl.constants import (  # noqa: PLC0415
+            DEFAULT_CUSTOM_LOADOUT_STEM as _CUSTOM_STEM,
+        )
+        active_is_custom = (
+            registry.state is not None
+            and registry.state.active == _CUSTOM_STEM
+        )
         # *Push fresh PillState to every existing pill.*
         # ``set_keys`` only fires the factory when the key list itself
         # changed (a plugin appeared or disappeared); a pill toggle
@@ -1463,27 +1510,15 @@ class LoadoutPanel(QtWidgets.QWidget):
                     else:
                         cell.set_diff_tint(None)
 
-        # RE-APPLY the panic dim AFTER the grid is (re)built. The earlier
-        # call near the top of this method (``_apply_panic_grid_visual``)
-        # runs against whatever
-        # pills exist at that point. On a fresh panel open with panic
-        # ALREADY engaged on disk, the grid is still empty then, so that
-        # first call dims nothing; the pills are built below and end up
-        # full-colour - making a boot-into-panic panel look un-panicked
-        # while the live-toggle path (pills already exist) dimmed
-        # correctly. Re-applying here makes both paths identical: the
-        # final, rebuilt pills always carry the panic opacity. Idempotent
-        # + cheap (effects cached per pill), so the double call is safe.
+        # RE-APPLY the panic dim AFTER the pills above are (re)built.
+        # ``refresh_from_registry`` also calls ``_apply_panic_grid_visual``
+        # near its top, but that runs against whatever pills exist at
+        # that point - on a fresh panel open with panic ALREADY engaged
+        # the grid is still empty then, and a pipeline rebuild mints
+        # pills with no opacity effect at all. Re-applying here makes
+        # every path identical: the final pills always carry the panic
+        # opacity. Idempotent + cheap (effects cached per pill).
         self._apply_panic_grid_visual(panic_engaged)
-
-        # Keep top-toolbar Undo/Redo in sync with the active stack on
-        # every refresh, not just wiring-layer ops. Without
-        # this, a registry mutation that bypasses `_toggle_plugin`
-        # (loadout switch, external apply_op_result) leaves the toolbar's
-        # enabled state stale.
-        from nsl.ui.wiring.events import _sync_undo_toolbar
-
-        _sync_undo_toolbar(self)
 
     def _apply_panic_grid_visual(self, engaged: bool) -> None:
         """Dim USER_ADDED pills via per-pill opacity when panic is on.
@@ -1715,6 +1750,19 @@ class LoadoutPanel(QtWidgets.QWidget):
             ),
             source_missing=source_missing,
             loaded_in_session=loaded,
+            # Session GUI-only baseline - drives the gui_pending_on/off
+            # + gui_committed visuals (lit chip, red chip text, red GUI
+            # border). The factory is the ONLY state source when the
+            # grid rebuilds through the filter/sort pipeline (set_keys
+            # re-mints pills without a refresh_from_registry pass), so
+            # omitting this wiped every GUI diff indicator on a sort or
+            # filter change. Same derivation as the refresh path.
+            session_gui_only=(
+                session_loaded.plugins[key].gui_only
+                if session_loaded is not None
+                and key in session_loaded.plugins
+                else None
+            ),
             diagnostic_available=diagnostic_available,
             failure_label=failure_label,
             # First-paint panic gate: read it off settings so a
