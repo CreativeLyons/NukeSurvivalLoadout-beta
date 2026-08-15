@@ -1,6 +1,6 @@
 """Bulk-operations wiring.
 
-Five bulk actions reach this module from the grid toolbar:
+Six bulk actions reach this module from the grid toolbar:
 
 * **Enable Selected** - every selected Plugin → ``enabled=True``.
 * **Disable Selected** - every selected Plugin → ``enabled=False``.
@@ -9,6 +9,8 @@ Five bulk actions reach this module from the grid toolbar:
   Plugins silently skipped).
 * **Clear GUI-only** - every selected Plugin → ``gui_only=False`` (Global
   Plugins silently skipped).
+* **Toggle GUI-only** - delegates to Set or Clear above: all on → clear,
+  otherwise → set. The only GUI-only action the toolbar shows.
 
 Key behavior:
 
@@ -462,6 +464,69 @@ def _plan_clear_gui_only(
 
 
 # ---------------------------------------------------------------------------
+# Toggle GUI-only - survey the selection, then reuse set / clear
+# ---------------------------------------------------------------------------
+
+
+def _eligible_gui_only_keys(panel, registry) -> List[str]:
+    """Selected keys a ``gui_only`` bulk can actually change.
+
+    Full selection minus Global Plugins. The survey must use the same
+    exclusion as the write path, else untouchable Globals could decide
+    the direction applied to the Plugins that do move. Empty when nothing
+    is selected, all-Global, or the panel has no selection model.
+    """
+    selection = getattr(panel, "selection_model", None)
+    if selection is None:
+        return []
+    keys = bulk_target_keys(selection.selected_keys())
+    if not keys:
+        return []
+    global_base = _global_names(registry)
+    return [key for key in keys if key not in global_base]
+
+
+def _all_gui_only(registry, keys: List[str]) -> bool:
+    """``True`` when every key in *keys* already has ``gui_only`` set.
+
+    An undecided Plugin (no entry in active or Global) counts as **off**,
+    matching the resolver's implicit ``gui_only=False`` default. Empty
+    *keys* returns ``True``, so callers must handle that case first.
+    """
+    for key in keys:
+        previous = _resolve_entry(registry, key)
+        if previous is None or not previous.gui_only:
+            return False
+    return True
+
+
+def _run_toggle_gui_only(panel) -> None:
+    """Sync ``gui_only`` across the selection in one click.
+
+    One rule - *turn them all on unless they are already all on*: none on
+    -> on, mixed -> on, all on -> off. So one click syncs a ragged
+    selection up and a second clears the lot. No-op on empty selection.
+
+    Delegates to :func:`_run_bulk` with the existing set / clear plan
+    builders, so the coalesced undo entry, silent Global skip,
+    auto-created ``Custom`` and deferred save all apply unchanged.
+    """
+    registry = _registry(panel)
+    eligible = _eligible_gui_only_keys(panel, registry)
+    if not eligible:
+        # Nothing selected, or all-Global. No undo entry, no change.
+        return
+
+    turn_on = not _all_gui_only(registry, eligible)
+    _run_bulk(
+        panel,
+        plan_fn=_plan_set_gui_only if turn_on else _plan_clear_gui_only,
+        kind="bulk_set_gui_only" if turn_on else "bulk_clear_gui_only",
+        touches_gui_only=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Bulk loop - one undo entry, silent Global gui_only skip
 # ---------------------------------------------------------------------------
 
@@ -827,6 +892,11 @@ def wire_bulk_ops(panel) -> None:
                 kind="bulk_clear_gui_only",
                 touches_gui_only=True,
             )
+        )
+    # Resolves its own direction, so it routes via _run_toggle_gui_only.
+    if hasattr(toolbar, "bulk_toggle_gui_only_requested"):
+        toolbar.bulk_toggle_gui_only_requested.connect(
+            lambda: _run_toggle_gui_only(panel)
         )
 
     panel._bulk_ops_wired = True

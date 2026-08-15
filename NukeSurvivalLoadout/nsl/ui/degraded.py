@@ -350,6 +350,7 @@ def _disable_write_surfaces(panel: Any) -> None:
             "_btn_clear_selection",
             "_btn_set_gui_only",
             "_btn_clear_gui_only",
+            "_btn_toggle_gui_only",
         ):
             _disable_button(getattr(grid_toolbar, attr, None))
 

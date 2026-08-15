@@ -94,6 +94,7 @@ _LABEL_SELECT_ALL = "Select &All"
 _LABEL_CLEAR_SELECTION = "Dese&lect All"
 _LABEL_SET_GUI_ONLY = "&Set GUI-only ({n})"
 _LABEL_CLEAR_GUI_ONLY = "Clear &GUI-only ({n})"
+_LABEL_TOGGLE_GUI_ONLY = "&Toggle GUI-only"
 
 
 # Object names - exposed for testability and to scope styling.
@@ -104,6 +105,7 @@ _OBJ_BULK_SELECT_ALL = "nsl_grid_toolbar_select_all"
 _OBJ_BULK_CLEAR_SELECTION = "nsl_grid_toolbar_clear_selection"
 _OBJ_BULK_SET_GUI_ONLY = "nsl_grid_toolbar_set_gui_only"
 _OBJ_BULK_CLEAR_GUI_ONLY = "nsl_grid_toolbar_clear_gui_only"
+_OBJ_BULK_TOGGLE_GUI_ONLY = "nsl_grid_toolbar_toggle_gui_only"
 _OBJ_SORT_DROPDOWN = "nsl_grid_toolbar_sort"
 _OBJ_SORT_LABEL = "nsl_grid_toolbar_sort_label"
 
@@ -151,7 +153,7 @@ _SORT_COMBO_QSS = (
 class PluginsGridToolbar(QtWidgets.QWidget):
     """Plugins grid toolbar.
 
-    Always-visible horizontal strip with six bulk-action buttons on the
+    Always-visible horizontal strip with the bulk-action buttons on the
     left and the sort-order dropdown on the right. Signal-out only - the
     toolbar does not own the selection model or the sort state of the
     grid; the wiring layer pushes counts in via :meth:`set_counts` and
@@ -163,6 +165,8 @@ class PluginsGridToolbar(QtWidgets.QWidget):
         bulk_invert_requested(): the user clicked ``Invert Selected``.
         bulk_set_gui_only_requested(): the user clicked ``Set GUI-only``.
         bulk_clear_gui_only_requested(): the user clicked ``Clear GUI-only``.
+        bulk_toggle_gui_only_requested(): the user clicked
+            ``Toggle GUI-only``.
         select_all_requested(): the user clicked ``Select All``.
         clear_selection_requested(): the user clicked ``Clear Selection``.
         sort_mode_changed(str): the dropdown's value changed. The
@@ -175,6 +179,7 @@ class PluginsGridToolbar(QtWidgets.QWidget):
     bulk_invert_requested = QtCore.Signal()
     bulk_set_gui_only_requested = QtCore.Signal()
     bulk_clear_gui_only_requested = QtCore.Signal()
+    bulk_toggle_gui_only_requested = QtCore.Signal()
     select_all_requested = QtCore.Signal()
     clear_selection_requested = QtCore.Signal()
     sort_mode_changed = QtCore.Signal(str)
@@ -247,6 +252,22 @@ class PluginsGridToolbar(QtWidgets.QWidget):
             self.bulk_clear_gui_only_requested
         )
 
+        # The visible GUI-only bulk action; the wiring layer picks its
+        # direction. Sits between the mutators and the selection actions.
+        self._btn_toggle_gui_only = HybridTextButton(
+            _LABEL_TOGGLE_GUI_ONLY, self
+        )
+        self._btn_toggle_gui_only.setObjectName(_OBJ_BULK_TOGGLE_GUI_ONLY)
+        self._btn_toggle_gui_only.setToolTip(
+            "Sync GUI-only across the selected Plugins: turns it on "
+            "unless every selected Plugin already has it on, in which "
+            "case it turns them all off. Global Plugins in the "
+            "selection are skipped silently."
+        )
+        self._btn_toggle_gui_only.clicked.connect(
+            self.bulk_toggle_gui_only_requested
+        )
+
         # Visible action set: Enable / Disable / Clear Selection only.
         # Invert and the GUI-only pair are constructed above (signals
         # alive for wiring) but never added to the layout. The counter
@@ -255,6 +276,7 @@ class PluginsGridToolbar(QtWidgets.QWidget):
         _visible_buttons = [
             self._btn_enable,
             self._btn_disable,
+            self._btn_toggle_gui_only,
             self._btn_select_all,
             self._btn_clear_selection,
         ]
@@ -429,6 +451,9 @@ class PluginsGridToolbar(QtWidgets.QWidget):
         for btn in (self._btn_enable, self._btn_disable, self._btn_invert):
             btn.setEnabled(enable_state)
         self._btn_clear_selection.setEnabled(enable_state)
+        # Keys off the selection count, not ``gui_only_count`` - it
+        # decides its own direction, so the current tally never gates it.
+        self._btn_toggle_gui_only.setEnabled(enable_state)
         self._btn_set_gui_only.setEnabled(gui_state)
         self._btn_clear_gui_only.setEnabled(gui_state)
 
