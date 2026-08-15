@@ -5,6 +5,39 @@ All notable changes to Nuke Survival Loadout are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-15
+
+### Added
+
+- **GUI-only sort mode** in the Plugins grid sort dropdown. Groups the
+  Plugins that load everywhere above those marked GUI-only, alphabetical
+  within each group, with a divider naming each group. Sits under
+  `Status` in the dropdown, and like every sort mode it is per-session
+  and resets on Nuke quit.
+- **Toggle GUI-only** bulk action on the Plugins grid toolbar, between
+  the Enable / Disable buttons and Select All / Deselect All. Syncs
+  GUI-only across the selected Plugins in one click: turns them all on
+  unless they are already all on, in which case it turns them all off.
+  So one click syncs a mixed selection and a second clears it. Acts on
+  the whole selection, records a single undo entry, and skips Global
+  Plugins silently. Does nothing when nothing is selected.
+
+### Fixed
+
+- Bulk actions on a saved Loadout no longer commit themselves silently.
+  `Enable Selected`, `Disable Selected`, and the new GUI-only toggle
+  wrote straight to disk for any named Loadout that already existed,
+  which advanced the saved baseline and left the Save button greyed out
+  even though the Loadout had just changed. Bulk edits are now held in
+  memory and persist on an explicit Save, matching single-Plugin
+  toggles. This also fixes a desync where undoing a bulk edit reverted
+  memory but left the change on disk, so a restart resurrected it.
+- Re-ordering or filtering the Plugins grid no longer clears the
+  change indicators. Switching sort mode, typing in the search field,
+  or toggling a folder's visibility rebuilds the grid, and the rebuild
+  was dropping the GUI-only change markers on each pill, the coloured
+  cell backdrops behind them, and the panic dim.
+
 ## [0.1.0] - 2026-06-18
 
 ### Added

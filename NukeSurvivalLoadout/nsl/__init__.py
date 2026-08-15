@@ -6,7 +6,7 @@ time; in headless boot NSL must not pull in Qt. UI code paths
 import it explicitly via ``from nsl import compat``.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from nsl import atomic_io, constants, log  # noqa: E402,F401
 
