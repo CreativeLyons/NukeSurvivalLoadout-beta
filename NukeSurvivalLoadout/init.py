@@ -4,28 +4,15 @@ Install model: the user adds exactly one line to ``~/.nuke/init.py``:
 
     nuke.pluginAddPath("<path>/NukeSurvivalLoadout")
 
-That makes Nuke's NUKE_PATH walker run this file. From here NSL:
+That makes Nuke's NUKE_PATH walker run this file. NSL then checks the
+version, adds the loadouts dir and the Global dir, and reads the
+dispatcher for diagnostics.
 
-  1. Runs the version gate; refusal short-circuits the rest of NSL.
-  2. Calls ``nuke.pluginAddPath`` on ``~/.nuke/loadouts`` iff a
-     dispatcher ``init.py`` already exists there - that hands control
-     to the dispatcher on a later NUKE_PATH pass.
-  3. Calls ``nuke.pluginAddPath`` on ``<install>/Global`` iff a chain
-     head ``init.py`` exists there. The Global layer is the baseline and must
-     EXECUTE first; ``pluginAddPath`` prepends to the remaining scan
-     queue (last-added runs first, verified on Nuke 16.0v9), so Global
-     is added AFTER the loadouts dir to run BEFORE it.
-  4. Runs the boot sequence (diagnostic read of dispatcher state).
+On a first run there is no dispatcher yet, so that step does nothing.
+The panel writes one the first time the user saves a Loadout.
 
-If no dispatcher exists (first run on this machine), step 2 is a
-no-op: the panel materializes it the first time the user saves a
-loadout.
-
-A broken active loadout is left to surface as Nuke's own traceback
-(file + line) - there is no crash signpost. Recovery is edit-and-relaunch
-(or PANIC_MODE in the dispatcher).
-
-``KeyboardInterrupt`` / ``SystemExit`` propagate.
+A broken loadout surfaces as Nuke's own traceback. Recovery is edit and
+relaunch, or PANIC_MODE in the dispatcher.
 """
 
 from __future__ import annotations
@@ -45,10 +32,8 @@ from nsl.boot.sequence import run_boot_sequence  # noqa: E402
 
 
 def _loadouts_dir() -> str:
-    # Routed through constants so the HOME-first resolution (Nuke's own
-    # ~/.nuke lookup on Windows) has exactly one implementation. Lazy
-    # import, matching _global_dir below - the sys.path insert above
-    # must run before any nsl import.
+    # Imported here, not at module top. The sys.path insert above has to
+    # run before any nsl import.
     from nsl.constants import loadouts_dir
 
     return str(loadouts_dir())
@@ -69,10 +54,8 @@ def _run() -> None:
     if os.path.exists(os.path.join(loadouts_dir, "init.py")):
         nuke.pluginAddPath(loadouts_dir)
 
-    # Global is added AFTER the loadouts dir so it EXECUTES first:
-    # pluginAddPath prepends to the remaining scan queue, last-added
-    # runs first. Global loads as the baseline; the active loadout
-    # layers on top.
+    # Nuke loads backwards and the last added, loads first.
+    # Global is last so it loads first. The others loadouts go after.
     global_dir = _global_dir()
     if os.path.exists(os.path.join(global_dir, "init.py")):
         nuke.pluginAddPath(global_dir)
