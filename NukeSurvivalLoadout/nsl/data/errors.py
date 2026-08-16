@@ -1,9 +1,7 @@
 """Typed exceptions for malformed NSL data files.
 
-The exceptions are inert: they carry diagnostic detail and chain the
-underlying parse exception via ``raise ... from ...``. They never delete,
-rename, modify, or auto-recover the on-disk file. Preserving the file is
-the reader's job; this module only describes the failure.
+These never delete, rename, or repair the file. They only report the
+failure, and chain the original parse error with ``raise ... from ...``.
 """
 
 from __future__ import annotations
@@ -20,12 +18,7 @@ PathLike = Union[str, "os.PathLike[str]"]
 
 
 class MalformedNSLDataError(Exception):
-    """Common base for malformed NSL data-file exceptions.
-
-    Callers may catch this to handle any concrete subclass uniformly
-    (terminal warning, Summary-tab advisory) while still branching on
-    subclass for file-specific messaging.
-    """
+    """Common base for malformed NSL data-file exceptions."""
 
     def __init__(self, path: PathLike, reason: str) -> None:
         self.path: str = os.fspath(path)

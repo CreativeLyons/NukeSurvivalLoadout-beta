@@ -1,14 +1,7 @@
 """In-memory loadout shapes used by the panel layer.
 
-Public surface:
-    - ``PluginEntry`` - dataclass for one plugin's per-Loadout state.
-    - ``LoadoutFile`` - dataclass for one loadout's resolved state.
-
-These started life as the ``.loadout`` JSON document model. The JSON era
-is over - loadout files on disk are chain-format ``init.py`` files read
-by ``nsl.boot.loadout_file`` - but the panel layer still
-uses these two dataclasses as its in-memory shapes (active model, Global
-model, baselines, diff math), so they live on here without any file I/O.
+Despite the name, nothing here reads or writes files. The on-disk
+``init.py`` format is handled by ``nsl.boot.loadout_file``.
 """
 
 from __future__ import annotations
@@ -24,11 +17,7 @@ __all__ = [
 
 @dataclass
 class PluginEntry:
-    """One Plugin's state inside a loadout's sparse-diff ``plugins`` map.
-
-    Both fields are part of the contract: every entry carries the full
-    two-field form, always.
-    """
+    """One Plugin's state inside a loadout's sparse-diff ``plugins`` map."""
 
     enabled: bool
     gui_only: bool

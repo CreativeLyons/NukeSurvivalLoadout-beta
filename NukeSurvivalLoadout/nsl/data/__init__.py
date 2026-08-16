@@ -1,8 +1,6 @@
 """NSL data layer: filename rules, in-memory loadout shapes, typed errors.
 
-Re-exports the public surface so callers can
-``from nsl.data import LoadoutFile, validate_filename``
-without reaching into the submodule directly.
+Import from here, not from the submodules.
 """
 
 from nsl.data.errors import (

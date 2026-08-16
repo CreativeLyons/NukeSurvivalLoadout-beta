@@ -1,11 +1,7 @@
 """Loadout name validation, sanitisation, and collision handling.
 
-Loadouts are folders (`<loadouts_dir>/<name>/init.py`); names are bare
-stems everywhere (the JSON-era `.loadout` extension is retired).
-
-Pure module: no I/O, no globals, no logger calls. `next_available_name`
-accepts `existing` as an in-memory iterable of taken stems; callers are
-responsible for listing the directory.
+A Loadout is a folder, so names are bare stems with no extension. This
+module does no I/O, so callers list the directory and pass the stems in.
 """
 
 from __future__ import annotations
@@ -63,12 +59,9 @@ class ValidationResult:
 
     Attributes:
         is_valid: True when the input matches every name rule.
-        filename: The candidate bare stem (e.g. ``"Comp_Daily"``) when valid.
-            When invalid, the value is the closest sanitised candidate NSL
-            would have written -- callers may surface it to the user for
-            context but must not commit it.
-        error: Human-readable error string for surfacing in the UI. Empty
-            string when `is_valid` is True.
+        filename: The valid bare stem. When invalid, this is the closest
+            sanitised candidate. Show it to the user, but never save it.
+        error: Message for the UI. Empty when `is_valid` is True.
     """
 
     is_valid: bool
@@ -79,10 +72,8 @@ class ValidationResult:
 def sanitize_user_input(text: str) -> str:
     """Apply NSL's whitespace normalisation to a user-typed Loadout name.
 
-    Space-handling rule: spaces (any kind of whitespace) resolve to
-    underscores. Leading/trailing whitespace is
-    stripped first so a name typed with a trailing space does not produce a
-    trailing underscore.
+    Any whitespace becomes an underscore. Leading and trailing whitespace
+    is stripped first, so a trailing space leaves no trailing underscore.
     """
     if text is None:  # type: ignore[unreachable]
         return ""
@@ -95,15 +86,13 @@ def sanitize_user_input(text: str) -> str:
 def validate_filename(name: str) -> ValidationResult:
     """Validate a Loadout name (a bare stem, e.g. `Comp_Daily`).
 
-    Rules enforced:
-      * Allowed characters: ASCII letters, digits, `-`, `_`.
-      * No leading dot or underscore in the stem.
-      * Reserved stem `Global` (case-insensitive).
-      * Reserved stem `Custom` (case-insensitive).
-      * Windows reserved device names (CON, PRN, AUX, NUL, COM1-9,
-        LPT1-9; case-insensitive) rejected on every platform.
-      * Stem length cap (``LOADOUT_FILENAME_MAX_STEM_LEN`` characters).
-      * Empty stem rejected.
+    Rejected, in this order:
+      * An empty stem, or one starting with `.` or `_`.
+      * The reserved stems `Global` and `Custom`, in any case.
+      * Windows device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9) in
+        any case, on every platform.
+      * A stem over ``LOADOUT_FILENAME_MAX_STEM_LEN`` characters.
+      * Any character outside ASCII letters, digits, `-`, and `_`.
     """
     if name is None:  # type: ignore[unreachable]
         return ValidationResult(False, "", _ERR_EMPTY_STEM)
@@ -140,28 +129,19 @@ def validate_filename(name: str) -> ValidationResult:
 def next_available_name(base: str, existing: Iterable[str]) -> str:
     """Return the lowest-numbered non-colliding loadout stem for `base`.
 
-    On collision, NSL appends `_2`, `_3`, ... (lowest unused integer
-    >= 2). The base stem itself is preferred when it is not in
-    `existing`.
+    Returns `base` when it is free, else appends `_2`, `_3`, and so on.
+    `existing` is read once, so a generator is fine.
 
-    `existing` is consumed once; pass a set/list/tuple/generator of bare
-    stems. Comparison is CASE-INSENSITIVE (casefold): the target
-    filesystems (NTFS always, default macOS APFS) treat `Foo` and `foo`
-    as the same directory, so a case-sensitive check would let a new
-    `Foo` silently write into an existing `foo`. The returned value
-    keeps the caller's case (filesystems are case-preserving; so is
-    NSL).
+    Matching is case-insensitive, because NTFS and default macOS APFS
+    treat `Foo` and `foo` as the same folder. A case-sensitive check
+    would let a new `Foo` write into an existing `foo`. The returned
+    stem keeps the caller's case.
 
-    The collision suffix never pushes the result past the rules: the base
-    stem is truncated to reserve room for `_<n>` before the suffix is
-    appended, and every suffixed candidate is re-validated, so a returned
-    `_<n>` stem always satisfies `validate_filename` (length cap
-    included). The suffix budget is recomputed each iteration because the
-    digit count grows (`_9` -> `_10` costs one more character).
+    The result always passes `validate_filename`. The base is truncated
+    to leave room for the `_<n>` suffix, and that room grows at `_10`.
 
-    Raises ValueError when `base` cannot produce a valid name (e.g.
-    empty, disallowed characters). Callers should run `validate_filename`
-    first when accepting user input.
+    Raises ValueError when `base` cannot make a valid name. Run
+    `validate_filename` first on user input.
     """
     stem = sanitize_user_input(base)
     if not stem:
