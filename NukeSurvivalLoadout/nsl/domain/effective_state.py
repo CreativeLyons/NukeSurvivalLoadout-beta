@@ -1,27 +1,13 @@
 """Sparse-diff resolver - per-Plugin effective (`enabled`, `gui_only`).
 
-Public surface:
-    - ``Layer`` - string enum of provenance values (``LOADOUT`` / ``GLOBAL``
-      / ``DEFAULT``).
-    - ``EffectiveState`` - dataclass returned by ``resolve_effective``.
-    - ``resolve_effective(plugin, loadout, global_loadout, source)`` - pure
-      function: takes the Plugin Name, the active user Loadout (or None),
-      the resolved Global Loadout (or None), and the Plugins Folder origin
-      tag, and returns an ``EffectiveState``.
+Both fields resolve independently against the same layer stack:
 
-Both fields resolve independently against the same layer stack with
-identical precedence:
+    1. active Loadout entry
+    2. Global Loadout entry
+    3. default
 
-    1. active Loadout entry (if the Plugin appears in `loadout.plugins`)
-    2. Global Loadout entry (if the Plugin appears in `global_loadout.plugins`)
-    3. default `(false, false)`
-
-The resolution is field-by-field: a Loadout entry that overrides only
-`gui_only` inherits `enabled` from Global, and vice versa. (The on-disk
-schema always writes both fields in the same entry, but a future entry
-shape that carried just one is handled the same way; current consumers
-build entries from the existing ``PluginEntry`` dataclass which carries
-both.)
+A Loadout entry that overrides only `gui_only` inherits `enabled` from
+Global, and the other way round.
 """
 
 from __future__ import annotations
@@ -54,19 +40,14 @@ class EffectiveState:
     Attributes:
         enabled: Resolved enabled flag.
         gui_only: Resolved gui_only flag.
-        enabled_source: Which layer supplied ``enabled``
-            (``Layer.LOADOUT`` / ``Layer.GLOBAL`` / ``Layer.DEFAULT``).
-        gui_only_source: Which layer supplied ``gui_only``.
-        diverges_from_global: True iff at least one resolved field comes
-            from the active Loadout entry **and** differs from the value
-            Global would have supplied for that field. Drives the panel's
+        enabled_source: Which ``Layer`` supplied ``enabled``.
+        gui_only_source: Which ``Layer`` supplied ``gui_only``.
+        diverges_from_global: True when a field comes from the active
+            Loadout and differs from what Global would give. Drives the
             purple divergence border on Global Plugins.
         plugin: The Plugin Name the state was resolved for.
-        source: The Plugins Folder origin tag carried through from the
-            caller (the scanner / inventory layer). Opaque to the resolver
- - left to the caller (panel UI, snapshot writer) to interpret.
-            ``None`` when the Plugin is not in the scanned inventory but
-            is referenced by a Loadout entry (orphan-deviation case).
+        source: Plugins Folder origin tag, passed through untouched.
+            ``None`` when a Loadout names a Plugin that was not scanned.
     """
 
     enabled: bool
@@ -96,12 +77,11 @@ def _resolve_field(
 ) -> tuple[bool, str, Optional[bool]]:
     """Return ``(value, source_layer, global_value_if_any)`` for one field.
 
-    ``global_value_if_any`` is the value Global would have supplied
-    (``None`` if Global had no entry for this Plugin). Used by the caller
-    to compute ``diverges_from_global``.
+    ``global_value_if_any`` is what Global would have supplied, or
+    ``None``. The caller uses it for ``diverges_from_global``.
 
-    ``is_global_active`` flips the default for ``enabled`` when no
-    entry exists in either layer - see the default-value branch below.
+    ``is_global_active`` flips the ``enabled`` default when neither
+    layer has an entry.
     """
     global_value: Optional[bool] = (
         getattr(global_entry, field_name) if global_entry is not None else None
@@ -115,28 +95,13 @@ def _resolve_field(
         )
     if global_entry is not None:
         return (bool(global_value), Layer.GLOBAL, global_value)
-    # No entry in either layer → defaulting branch.
-    #
-    # ``enabled`` default depends on which view the user is in:
-    #
-    # * ``is_global_active=False`` (a user loadout is active) →
-    #   default True. Mirrors the panel resolver's
-    #   ``PluginEntry(enabled=True, gui_only=False)`` fallback so the
-    #   sparse-diff contract holds: the user
-    #   file is silent on a plugin → load it with default behaviour.
-    #   Without this, sparse loadouts produced phantom "+N pending"
-    #   on every restart (panel said enable, loader skipped).
-    # * ``is_global_active=True`` (Global is active - the read-only
-    #   Global view) → default False. Global is "what the TD shipped";
-    #   user-added plugins are not part of that view. Defaulting them
-    #   to enabled would graft the user's plugins onto Global and
-    #   surface a "+N would load on restart" against a slot the user
-    #   can't save. In the Global view, all user-added plugins are
-    #   treated as off; only plugins the Global loadout names carry an
-    #   assumed on/off state.
-    #
-    # ``gui_only`` always defaults False (permissive default - load
-    # everywhere unless told otherwise).
+    # No entry in either layer. The default depends on the view:
+    #   * user Loadout active - enabled True. A sparse diff is silent
+    #     about the plugins it does not change.
+    #   * Global active       - enabled False. Global is the TD's
+    #     read-only set and user plugins are not in it.
+    #   * gui_only            - always False, in both views.
+    # A False default under a user Loadout brings back phantom "+N pending".
     if field_name == "enabled":
         default_value = False if is_global_active else True
     else:
@@ -155,23 +120,16 @@ def resolve_effective(
     """Resolve the effective state of ``plugin`` for the active session.
 
     Args:
-        plugin: Plugin Name (the key used in loadout plugins maps).
-        loadout: The active user Loadout, or ``None`` when no user Loadout
-            is active (rare; the panel always has an active Loadout in v1,
-            but the resolver is robust to either).
-        global_loadout: The resolved Global Loadout (the Global layer
-            collapsed to a single in-memory Loadout), or ``None`` when no
-            Global layer is configured.
-        source: The Plugins Folder origin tag for ``plugin``, carried
-            through into ``EffectiveState.source``. Opaque to the resolver.
-        is_global_active: ``True`` when the active "loadout" is the
-            read-only Global view (no user loadout overlay). Flips the
-            default-enabled behaviour for plugins with no entry in
-            either layer - see ``_resolve_field``.
+        plugin: Plugin Name, the key used in loadout plugins maps.
+        loadout: The active user Loadout, or ``None``.
+        global_loadout: The Global layer collapsed to one Loadout, or
+            ``None`` when no Global layer is configured.
+        source: Plugins Folder origin tag, passed into the result.
+        is_global_active: ``True`` in the read-only Global view. Flips
+            the enabled default, see ``_resolve_field``.
 
     Returns:
-        An ``EffectiveState`` with both flags resolved field-by-field
-        and provenance recorded per field.
+        An ``EffectiveState`` with both flags and their provenance.
     """
     loadout_entry = _entry_for(loadout, plugin)
     global_entry = _entry_for(global_loadout, plugin)

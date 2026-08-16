@@ -1,13 +1,9 @@
 """NSL domain layer - pure-Python plugin / loadout state logic.
 
-Re-exports the public surface of each domain submodule. NO ``import nuke``
-in this layer.
+Never ``import nuke`` here.
 
-There is no ``failure_taxonomy`` (FailureCategory / classify) in this
-layer: Nuke's NUKE_PATH walker is the loader and plugin-load failures
-crash the interpreter outright, so NSL does not classify them. The
-graceful-failure surface that survives (source folder missing, dispatcher
-syntax error) is small enough not to need an enum.
+There is no failure taxonomy on purpose. A plugin-load failure crashes
+the interpreter, so there is nothing left for NSL to classify.
 """
 
 from nsl.domain.effective_state import EffectiveState, Layer, resolve_effective

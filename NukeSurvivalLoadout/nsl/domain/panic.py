@@ -1,24 +1,11 @@
 """Panic-button state + Reset-Global-to-Default operations.
 
-Panic lives in the dispatcher (``~/.nuke/loadouts/init.py``) as the
-``PANIC_MODE`` constant. Reads / writes flow through
-:mod:`nsl.boot.dispatcher`, which writes atomically and
-immediately (panic toggles take effect right away).
+Panic is the ``PANIC_MODE`` constant in the dispatcher
+(``~/.nuke/loadouts/init.py``). Toggles are written at once through
+:mod:`nsl.boot.dispatcher`, so they take effect right away.
 
-Public surface:
-    - ``is_panic_engaged(dispatcher_path)`` - read the current panic flag.
-    - ``engage_panic(dispatcher_path)`` - set panic True and write immediately.
-    - ``release_panic(dispatcher_path)`` - set panic False and write immediately.
-    - ``reset_global_to_default(loadout, scope, ...)`` - clear per-Plugin
-      overrides for Global Plugins inside an in-memory user Loadout.
-
-``dispatcher_path`` is optional on every panic helper - it defaults to the
-canonical location under ``loadouts_dir()/init.py``. ``reset_global_to_default``
-remains a pure in-memory transformation on a ``LoadoutFile`` (legacy
-panel-side model); persistence is the caller's responsibility.
-
-The ``nuke`` module is not imported anywhere here. ``KeyboardInterrupt``
-and ``SystemExit`` are never caught.
+``dispatcher_path`` is optional everywhere and defaults to
+``loadouts_dir()/init.py``.
 """
 
 from __future__ import annotations
@@ -71,18 +58,14 @@ def _resolve_path(path: Optional[PathLike]) -> str:
 def is_panic_engaged(path: Optional[PathLike] = None) -> bool:
     """Return the persisted panic flag from the dispatcher.
 
-    Missing dispatcher reads as ``DispatcherState()`` (panic off) without
-    side effects. A dispatcher with a SyntaxError parses as defaults too
-    (see :func:`nsl.boot.dispatcher.read_dispatcher`).
+    A missing or broken dispatcher reads as panic off, with no side
+    effects. See :func:`nsl.boot.dispatcher.read_dispatcher`.
     """
     return read_dispatcher(_resolve_path(path)).panic
 
 
 def engage_panic(path: Optional[PathLike] = None) -> None:
-    """Set panic True in the dispatcher and write immediately.
-
-    Atomic-replace via :func:`nsl.boot.dispatcher.write_dispatcher`.
-    """
+    """Set panic True in the dispatcher and write immediately."""
     _set_panic(True, path=path)
 
 
@@ -94,10 +77,8 @@ def release_panic(path: Optional[PathLike] = None) -> None:
 def _set_panic(value: bool, path: Optional[PathLike]) -> None:
     target = _resolve_path(path)
     current = read_dispatcher(target)
-    # Preserve the folder list - it's authoritative state in the dispatcher
-    # now, so a panic toggle must not wipe it. (Constructing a fresh
-    # DispatcherState without folders would clobber the user's Plugins
-    # Folders on every panic on/off.)
+    # Carry the folder list over. A fresh DispatcherState would drop the
+    # user's Plugins Folders on every panic toggle.
     updated = DispatcherState(
         panic=value, active=current.active, folders=current.folders
     )
@@ -118,10 +99,9 @@ def reset_global_to_default(
 ) -> LoadoutFile:
     """Clear per-Plugin overrides for Global Plugins in ``loadout``.
 
-    Operates on the *active user Loadout's* in-memory ``LoadoutFile``.
-    Removes per-Plugin entries whose name is part of the Global layer so
-    resolution falls back to Global. Returns the same ``LoadoutFile``
-    object, mutated in place.
+    Removes the entries named in the Global layer, so resolution falls
+    back to Global. Mutates ``loadout`` in place and returns it. Saving
+    is the caller's job.
     """
     if scope not in _VALID_SCOPES:
         raise ValueError(

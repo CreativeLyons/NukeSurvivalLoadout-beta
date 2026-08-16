@@ -1,12 +1,7 @@
 """Per-Loadout undo / redo stack.
 
-Undo / Redo is capped at 50 steps, scoped per-Loadout, session-only, and
-excludes file-level Loadout ops. Bulk operations coalesce into a single step.
-
-Pure module: no I/O, no globals, no `nuke` imports, no persistence.
-Callers own the meaning of an undo entry; this module only stores
-opaque payloads and enforces the discipline (cap, FIFO eviction,
-redo-branch clear on push, bulk coalescing).
+Session only, never persisted. Entries are opaque payloads and the
+caller decides what they mean. File-level Loadout ops do not push here.
 """
 
 from __future__ import annotations
@@ -19,22 +14,7 @@ MAX_UNDO_STEPS: int = 50
 
 @dataclass
 class UndoStack:
-    """Mutable per-Loadout undo / redo stack.
-
-    Entries are opaque to this module; the calling layer decides their
-    shape (typically a dict describing the prior and next state of the
-    affected Plugins so the operation can be reversed).
-
-    Cap is `MAX_UNDO_STEPS`. When the cap is exceeded by a new push,
-    the oldest entry is discarded so the most recent steps survive.
-
-    Standard undo discipline: a new push clears the redo branch.
-
-    Bulk coalescing: wrap a series of related state changes in
-    `with stack.bulk():` and push individually inside. The block's
-    pushes are buffered and emitted on exit as a single combined
-    entry under the `entries` key.
-    """
+    """Mutable per-Loadout undo / redo stack."""
 
     _undo: List[Any] = field(default_factory=list)
     _redo: List[Any] = field(default_factory=list)
@@ -55,10 +35,9 @@ class UndoStack:
     def push(self, entry: Any) -> None:
         """Record a new undo entry.
 
-        Inside a `bulk()` context the entry is buffered for coalescing
-        rather than pushed individually. Outside a bulk context the
-        entry is appended; if doing so exceeds `MAX_UNDO_STEPS` the
-        oldest entry is evicted. Any redo branch is discarded.
+        Inside a `bulk()` block the entry is buffered instead. Otherwise
+        the oldest entry is dropped past `MAX_UNDO_STEPS`, and the redo
+        branch is cleared.
         """
         if self._bulk_depth > 0:
             self._bulk_buffer.append(entry)
@@ -100,20 +79,17 @@ class UndoStack:
     def snapshot(self) -> Dict[str, List[Any]]:
         """Return a shallow copy of the current undo / redo branches.
 
-        For introspection only -- callers must not mutate the returned lists.
+        For introspection only. Do not mutate the returned lists.
         """
         return {"undo": list(self._undo), "redo": list(self._redo)}
 
     def bulk(self) -> "_BulkContext":
         """Open a bulk-operation context that coalesces N pushes into one entry.
 
-        Pushes made inside the `with` block are buffered. On normal
-        exit the buffered entries are committed as a single combined
-        entry of shape `{"bulk": True, "entries": [...]}`. If the buffer
-        is empty on exit nothing is pushed. On exception (including
-        `KeyboardInterrupt` / `SystemExit`) the buffer is discarded and
-        the exception is re-raised; the existing undo / redo branches
-        are not disturbed.
+        Pushes inside the block are buffered and committed on exit as one
+        entry of shape `{"bulk": True, "entries": [...]}`. An empty buffer
+        pushes nothing. On any exception the buffer is dropped and the
+        existing branches are left alone.
         """
         return _BulkContext(self)
 
@@ -121,9 +97,8 @@ class UndoStack:
 class _BulkContext:
     """Context manager returned by `UndoStack.bulk()`.
 
-    Nested `bulk()` blocks are supported -- only the outermost commit
-    flushes the buffer, mirroring how a user-visible bulk operation
-    composed of helper functions still counts as one undo step.
+    Nesting works. Only the outermost block flushes the buffer, so one
+    user action built from helpers still counts as one undo step.
     """
 
     def __init__(self, stack: UndoStack) -> None:
@@ -137,10 +112,9 @@ class _BulkContext:
         self._stack._bulk_depth -= 1
         if self._stack._bulk_depth > 0:
             return False
-        # Outermost exit: commit or discard the buffer.
         buffered = self._stack._bulk_buffer
         self._stack._bulk_buffer = []
-        # Re-raise control-flow exceptions before mutating state further.
+        # Let control-flow exceptions out before touching more state.
         if exc_type is KeyboardInterrupt or exc_type is SystemExit:
             return False
         if exc_type is not None:
@@ -158,13 +132,8 @@ class _BulkContext:
 class UndoStackRegistry:
     """Per-session collection of `UndoStack` instances keyed by Loadout stem.
 
-    The stem is the Loadout folder name
-    (e.g. `Custom`, `Comp_Daily`). Each Loadout owns its own stack;
-    switching the Active Loadout simply changes which key the caller
-    consults -- peer stacks are untouched.
-
-    The registry is session-only by design: it has no save / load
-    methods and is not persisted to disk.
+    The stem is the Loadout folder name. Switching the Active Loadout
+    only changes which key the caller reads, so peer stacks survive.
     """
 
     def __init__(self) -> None:
@@ -182,19 +151,15 @@ class UndoStackRegistry:
     def drop(self, stem: str) -> None:
         """Remove the stack for `stem` if present.
 
-        Called by file-level Loadout ops (delete) so a freshly created
-        Loadout that later reuses the same stem does not inherit a
-        stale undo history. File-level ops never push to a stack, but
-        they may need to discard one.
+        Called on delete, so a new Loadout that reuses the stem does not
+        inherit a stale history.
         """
         self._stacks.pop(stem, None)
 
     def rename(self, old_stem: str, new_stem: str) -> None:
         """Move the existing stack from `old_stem` to `new_stem`.
 
-        File-level rename does not push to the undo stack but it does
-        relocate identity; this keeps the user's in-session history
-        attached to the renamed Loadout.
+        Keeps the in-session history attached to the renamed Loadout.
         """
         if old_stem == new_stem:
             return
@@ -207,7 +172,7 @@ class UndoStackRegistry:
         return iter(self._stacks)
 
     def clear(self) -> None:
-        """Discard every stack -- e.g. on Nuke close."""
+        """Discard every stack, for example on Nuke close."""
         self._stacks.clear()
 
 

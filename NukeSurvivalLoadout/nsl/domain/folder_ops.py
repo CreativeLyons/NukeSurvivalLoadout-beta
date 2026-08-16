@@ -1,43 +1,13 @@
 """Plugins Folder management operations.
 
 Folders are declared at the top of each loadout file as ``plugins_A``,
-``plugins_B``... assignments and surface as
-``LoadoutModel.folders: list[FolderDecl]``. This module's pure functions
-operate on a ``LoadoutModel``; the ``*_and_save`` wrappers write the active
-loadout file back to disk via
-:func:`nsl.boot.loadout_file.write_loadout` (atomic-replace).
+``plugins_B`` and so on, and surface as ``LoadoutModel.folders``. The
+``*_and_save`` wrappers write the file back through
+:func:`nsl.boot.loadout_file.write_loadout`.
 
-When mutating ``model.folders`` we always clear ``model.user_prefix`` so
-the renderer regenerates the NSL prologue (imports + folder vars + helper)
-from scratch - that's the "NSL manages the folder var region" rule. The
-regenerated region is exactly what sits BETWEEN the ``# === BEGIN/END NSL
-PROLOGUE ===`` markers; ``replace`` carries ``model.user_prologue`` (the
-hand-authored text ABOVE those markers) and ``model.user_suffix`` (below
-the END-managed marker) forward untouched. So a folder edit preserves the
-user's custom imports / helpers and only rewrites the generated head.
-
-Public surface:
-    - ``HealthState`` - Healthy / Unreachable / PermissionDenied / Empty
-    - ``FolderHealth`` - ``(state, reason)`` carrier
-    - ``health_check(path)`` - one of the four mutually exclusive states
-    - ``add_folder(model, path)`` -> ``AddResult``
-    - ``remove_folder(model, path, *, actively_loaded_plugin_names,
-      plugin_names_unique_to_folder)`` -> ``RemoveResult``
-    - ``reorder(model, new_order)`` -> new ``LoadoutModel``
-    - ``add_folder_and_save``, ``remove_folder_and_save``,
-      ``reorder_and_save`` - thin wrappers that persist via
-      :func:`nsl.boot.loadout_file.write_loadout` (atomic-replace).
-
-Errors:
-    - ``FolderAlreadyConfigured`` - add_folder no-op signal.
-    - ``FolderNotConfigured`` - remove_folder / reorder targets a folder
-      that is not in the model's folder list.
-    - ``FolderValidationError`` - add_folder rejected the path (missing,
-      not a directory, no read permission).
-    - ``ReorderError`` - reorder received an invalid permutation.
-
-This module never imports ``nuke``. It re-raises ``KeyboardInterrupt`` and
-``SystemExit`` unconditionally.
+Clearing ``model.user_prefix`` makes the renderer rebuild the NSL
+prologue. Text above the ``BEGIN NSL PROLOGUE`` marker and below the
+END marker is carried through untouched, so user edits survive.
 """
 
 from __future__ import annotations
@@ -134,12 +104,8 @@ def health_check(path: PathLike) -> FolderHealth:
     has_plugin = False
     with scanner as it:
         for entry in it:
-            # ``follow_symlinks=True`` (the default) so this matches
-            # ``scanner.scan_folder``: a TD who symlinks Plugin folders into a
-            # Plugins Folder gets them discovered in the grid, and health must
-            # agree (Issue 18). Broken / circular symlinks naturally return
-            # False from ``is_dir`` (and raise no exception in practice, but we
-            # guard ``OSError`` anyway), so they are never miscounted.
+            # Default ``follow_symlinks=True`` so this matches
+            # ``scanner.scan_folder`` and health agrees with the grid.
             try:
                 if not entry.is_dir():
                     continue
@@ -147,10 +113,6 @@ def health_check(path: PathLike) -> FolderHealth:
                 continue
             if _name_is_ignored(entry.name):
                 continue
-            # The shared predicate (scanner.plugin_folder_has_content) keeps
-            # discovery and health classification on one symlink + content
-            # policy; it follows links and tolerates broken/inaccessible
-            # entries without raising.
             if not plugin_folder_has_content(entry.path):
                 continue
             has_plugin = True
@@ -201,10 +163,8 @@ class ReorderError(Exception):
 def _normalise(path: PathLike) -> str:
     """The STORED form of a folder path - separators/dots unified, case kept.
 
-    Identity COMPARISONS use :func:`canon_for_compare` instead, which
-    additionally folds case so the same folder typed/picked with
-    different casing matches on case-insensitive filesystems
-    (Windows, default macOS APFS).
+    Use :func:`canon_for_compare` for comparisons instead. It also folds
+    case, which this does not.
     """
     return os.path.normpath(os.fspath(path))
 
@@ -229,17 +189,13 @@ _MAX_FOLDER_VAR_INDEX = 26 + 26 * 26 - 1  # 701 (inclusive)
 def canonical_folder_var(index: int) -> str:
     """Positional ``plugins_X`` var name for the folder at ``index``.
 
-    Single letters A-Z cover ``0..25``; double letters AA-ZZ cover
-    ``26..701`` (``26->AA``, ``27->AB`` ...). This is the one canonical
-    index->var mapping: the dispatcher's per-position vars and the
-    per-loadout ``init.py`` folder vars must agree, so both derive from
-    here rather than open-coding ``chr(ord('A') + index)`` (which yields
-    ``plugins_[`` at index 26 - an invalid identifier that turns the
-    rendered ``init.py`` into a ``SyntaxError``).
+    Single letters A-Z cover ``0..25`` and double letters AA-ZZ cover
+    ``26..701``. The dispatcher and the per-loadout ``init.py`` both
+    derive vars here so they agree. A plain ``chr(ord('A') + index)``
+    gives ``plugins_[`` at 26 and breaks the rendered file.
 
     Raises:
-        ``ValueError`` - ``index`` is negative or exceeds the AA-ZZ
-        range. Better a loud failure than emitting a garbage var.
+        ``ValueError`` when ``index`` is out of range.
     """
     if index < 0 or index > _MAX_FOLDER_VAR_INDEX:
         raise ValueError(
@@ -255,11 +211,6 @@ def canonical_folder_var(index: int) -> str:
 def _next_folder_var(existing_vars: Iterable[str]) -> str:
     """Return the next unused ``plugins_X`` var name (A, B, C, ...).
 
-    Walks the canonical A-Z then AA-ZZ ordering (see
-    :func:`canonical_folder_var`) and returns the first slot not already
-    taken. Practically the user will never hit double letters; the
-    fallback is a belt for the rare site that bolts on dozens of source
-    folders.
     """
     taken = set(existing_vars)
     for index in range(_MAX_FOLDER_VAR_INDEX + 1):
@@ -272,9 +223,7 @@ def _next_folder_var(existing_vars: Iterable[str]) -> str:
 def _with_folders(model: LoadoutModel, folders: List[FolderDecl]) -> LoadoutModel:
     """Return a copy of ``model`` with new ``folders`` and reset ``user_prefix``.
 
-    Resetting ``user_prefix`` to ``""`` is intentional - see the module
-    docstring. The renderer will synthesise a fresh canonical prefix from
-    docstring + folder vars + helper on the next ``write_loadout``.
+    Resetting ``user_prefix`` is intentional. See the module docstring.
     """
     return replace(
         model,
@@ -286,15 +235,13 @@ def _with_folders(model: LoadoutModel, folders: List[FolderDecl]) -> LoadoutMode
 def add_folder(model: LoadoutModel, path: PathLike) -> AddResult:
     """Validate ``path`` and prepend it to the model's folder list.
 
-    Returns a *new* ``LoadoutModel`` with the path at index 0 (highest
-    priority) and a ``FolderHealth`` derived from the same on-disk check.
-    Assigns the next free ``plugins_X`` var name to the new folder.
+    The path goes to index 0, which is the highest priority. Also
+    assigns the next free ``plugins_X`` var.
 
     Raises:
-        ``FolderValidationError`` - path missing, not a directory, or
-        unreadable.
-        ``FolderAlreadyConfigured`` - exact same normalised path already
-        in the model's folder list.
+        ``FolderValidationError`` when the path is missing, not a
+        directory, or unreadable.
+        ``FolderAlreadyConfigured`` when it is already in the list.
     """
     norm = _normalise(path)
 
@@ -325,22 +272,20 @@ def remove_folder(
 ) -> RemoveResult:
     """Remove ``path`` from the model's folder list and classify its Plugins.
 
-    Plugin entries inside the loadout that referenced the removed
-    folder's ``plugins_X`` var are NOT pruned by this function - the
-    caller decides. Loadout entries for Plugins coming from a removed
-    folder are preserved on disk so a re-add reactivates them cleanly.
+    Plugin entries that referenced the removed folder are not pruned.
+    They stay on disk so a re-add brings those Plugins back.
 
     Args:
         model: current in-memory active loadout model.
         path: the user-added folder to remove.
-        actively_loaded_plugin_names: Plugin names currently loaded in
-            the live Nuke session.
-        plugin_names_unique_to_folder: Plugin names that only this
-            folder provides.
+        actively_loaded_plugin_names: Plugin names loaded in the live
+            Nuke session.
+        plugin_names_unique_to_folder: Plugin names only this folder
+            provides.
 
     Returns:
-        ``RemoveResult`` carrying the new ``LoadoutModel`` and two
-        disjoint tuples: ``transitioned_to_missing`` and ``disappeared``.
+        ``RemoveResult`` with the new model and two disjoint tuples,
+        ``transitioned_to_missing`` and ``disappeared``.
 
     Raises:
         ``FolderNotConfigured`` if ``path`` is not in ``model.folders``.
@@ -378,11 +323,9 @@ def reorder(
 ) -> LoadoutModel:
     """Return a new ``LoadoutModel`` whose folders match ``new_order``.
 
-    ``new_order`` must be a permutation of the current USER folder paths -
-    same length, same set of (normalised) paths, no duplicates. The
-    ``global_plugins`` decl (Global-plugin overrides written by Save) is
-    not part of the reorderable list: the Global row is pinned in the UI,
-    so its decl is carried through unchanged at the end.
+    ``new_order`` must be a permutation of the current user folder
+    paths. The ``global_plugins`` decl is not reorderable, because the
+    Global row is pinned in the UI. It is carried through at the end.
     """
     user_decls = [
         decl for decl in model.folders if decl.var != GLOBAL_PLUGINS_VAR_NAME
@@ -404,9 +347,8 @@ def reorder(
             "new_order is not a permutation of current folder paths"
         )
 
-    # Preserve each folder's existing ``var`` assignment when reordering -
-    # the loadout's plugin call lines still reference those vars and we
-    # don't want a benign reorder to invalidate every plugin call.
+    # Keep each folder's existing ``var``. The plugin call lines still
+    # reference them, so reassigning would break every call.
     by_path = {canon_for_compare(decl.path): decl for decl in user_decls}
     reordered = [by_path[p] for p in incoming]
     return _with_folders(model, [*reordered, *global_decls])
@@ -415,11 +357,6 @@ def reorder(
 # ---------------------------------------------------------------------------
 # Persisting wrappers
 # ---------------------------------------------------------------------------
-#
-# These wrappers do the in-memory transform and then delegate to
-# ``write_loadout``, which atomically replaces the active loadout file:
-# NSL writes the active loadout file immediately when the user adds,
-# removes, or reorders a Plugins Folder.
 
 
 def add_folder_and_save(

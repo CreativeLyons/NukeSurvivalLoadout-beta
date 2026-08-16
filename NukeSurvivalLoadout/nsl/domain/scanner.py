@@ -1,16 +1,10 @@
 """Plugin Standard scanner - discover Plugins inside a Plugins Folder.
 
-Public surface:
-    Plugin - frozen value object (identity + folder metadata)
-    scan_folder(path) - non-recursive scan returning list[Plugin]
+Read-only. Nothing here writes to disk or changes its input.
 
-Scope contract:
-    - Pure / read-only. No disk writes, no input mutation.
-    - Plugin value object carries identity + folder metadata only; it does NOT
-      embed `enabled` / `gui_only` (those are Loadout state).
-    - No `import nuke`. Domain layer is Nuke-free.
-    - Space→underscore resolution happens here. Ignored and empty folders are
-      silently skipped (no panel surfacing for non-Plugin folders).
+``Plugin`` carries identity and folder metadata only. `enabled` and
+`gui_only` are Loadout state and live elsewhere. Ignored and empty
+folders are skipped with no panel message.
 """
 
 from __future__ import annotations
@@ -37,15 +31,9 @@ PathLike = Union[str, "os.PathLike[str]"]
 class Plugin:
     """A Plugin discovered by a scan of a Plugins Folder.
 
-    `name` is the Plugin Name: the on-disk folder basename, byte-exact (no
-    normalization - see :func:`_resolve_plugin_name`). `folder_name` is the
-    same byte-exact basename, retained as an explicit alias for call sites that
-    address the folder on disk. `path` is the absolute path to the folder.
-    `source` is the Plugins Folder that owned this Plugin in this scan
-    (absolute path).
-
-    The value object intentionally carries no Loadout state (enabled /
-    gui_only); resolution of effective state lives downstream.
+    `name` and `folder_name` are both the folder basename, byte-exact.
+    See :func:`_resolve_plugin_name` for why there is no normalization.
+    `path` is absolute. `source` is the Plugins Folder it was found in.
     """
 
     name: str
@@ -57,20 +45,10 @@ class Plugin:
 def _is_naming_rule_valid(folder_name: str) -> bool:
     """Accept any non-empty folder name as a Plugin Name.
 
-    Do not gate on the folder name: real-world plugin folders carry dotted
-    version suffixes (``KnobScripter-3.2.0``, ``AnimationMaker_v1.5``,
-    ``Dots_v5.1``, ``Stamps_1.1.0``) and other punctuation. A character
-    whitelist (letters / digits / dash / underscore / space only, leading
-    alnum) would silently filter every one of them. NSL must surface whatever
-    is actually present in the Plugins Folder, not an invented standard.
-
-    The real filtering still happens - just not here:
-      * junk / hidden dirs (``.git``, ``__pycache__``, anything starting
-        with ``_`` or ``.``) → :func:`_is_ignored_folder`.
-      * empty folders → :func:`plugin_folder_has_content`.
-
-    So this guard only rejects a literally empty name (which a real directory
-    entry can never have).
+    Do not add a character whitelist. Real plugin folders carry version
+    suffixes like ``KnobScripter-3.2.0`` and would be filtered out. Junk
+    and empty folders are already handled by :func:`_is_ignored_folder`
+    and :func:`plugin_folder_has_content`.
     """
     return bool(folder_name)
 
@@ -88,19 +66,11 @@ def _is_ignored_folder(folder_name: str) -> bool:
 def _resolve_plugin_name(folder_name: str) -> str:
     """Resolve a folder name to a Plugin Name: the byte-exact basename.
 
-    The Plugin Name is the on-disk folder basename, unchanged. We deliberately
-    do NOT normalize (e.g. spaces -> underscores): the name is used downstream
-    to address the folder on disk - ``os.path.join(folder, name)`` and the
-    ``(folder, name)`` dedup tuple in both the per-loadout helper
-    (``_HELPER_DEF``) and the global loader. Those compare against the real
-    basenames returned by ``os.listdir``, so any normalization here forks the
-    plugin's identity: an explicit Disable / GUI-only on a space-named folder
-    would target a path that does not exist and fail to suppress the folder
-    sweep, silently reverting the user's decision at next boot. Normalization
-    also collapsed ``My Plugin`` and ``My_Plugin`` into one key, hiding a
-    plugin. The name is always rendered with ``repr()`` in generated code, so a
-    space is syntactically safe. Keep this seam identity; do not re-add
-    normalization without solving the on-disk identity problem first.
+    Do not normalize, and never turn spaces into underscores. The name
+    addresses the folder on disk and is compared against real
+    ``os.listdir`` basenames, so any change forks the plugin's identity.
+    A Disable on a space-named folder would target a missing path and
+    revert at next boot.
     """
     return folder_name
 
@@ -108,21 +78,11 @@ def _resolve_plugin_name(folder_name: str) -> str:
 def plugin_folder_has_content(folder_path: PathLike) -> bool:
     """Report whether a Plugin folder has meaningful content.
 
-    This is the ONE canonical "is this Plugin folder non-empty" predicate.
-    Both Plugin discovery (:func:`scan_folder`) and folder health
-    classification (``folder_ops.health_check``) call it, so the two cannot
-    drift on what counts as content - in particular on the symlink policy
-    below. (Issue 18: ``health_check`` previously used
-    ``follow_symlinks=False`` and reported a folder of symlinked plugins
-    EMPTY even though those plugins appeared in the grid.)
+    The one canonical test, used by both :func:`scan_folder` and
+    ``folder_ops.health_check`` so the two cannot drift.
 
-    A folder is considered empty if it contains no files, or only files that
-    don't count as content. Files starting with `.` (dot) and `Thumbs.db` do
-    not count. `.gitkeep` is the one exception that DOES count.
-
-    Subfolders (e.g. `gizmos/`, `python/`) count as content - only files are
-    enumerated as non-content. A folder containing only a non-empty subfolder
-    is treated as having meaningful content.
+    Dotfiles and `Thumbs.db` do not count as content. `.gitkeep` does.
+    Any subfolder counts, because only files are checked.
     """
     try:
         entries = list(os.scandir(os.fspath(folder_path)))
@@ -132,14 +92,9 @@ def plugin_folder_has_content(folder_path: PathLike) -> bool:
     for entry in entries:
         try:
             name = entry.name
-            # ``follow_symlinks=True`` (the default) so a Plugin organising
-            # its internals via symlinks (``Octopus/python -> shared/python``)
-            # still counts as having content. Broken / circular symlinks
-            # return False from ``is_dir`` naturally, so they don't get
-            # miscounted as content.
+            # Default ``follow_symlinks=True``, so a Plugin that symlinks
+            # its own subfolders still counts as having content.
             if entry.is_dir():
-                # Any subfolder counts as content - the non-content list
-                # enumerates files only (.dotfiles, Thumbs.db).
                 return True
             if name == PLUGIN_GITKEEP_EXCEPTION:
                 return True
@@ -149,8 +104,7 @@ def plugin_folder_has_content(folder_path: PathLike) -> bool:
                 continue
             return True
         except OSError:
-            # A single inaccessible entry must not abort the scan; treat as
-            # non-content and keep looking.
+            # One unreadable entry must not abort the scan.
             continue
     return False
 
@@ -158,16 +112,9 @@ def plugin_folder_has_content(folder_path: PathLike) -> bool:
 def scan_folder(path: PathLike) -> List[Plugin]:
     """Return the Plugins discovered in a Plugins Folder.
 
-    Behavior:
-        - Non-recursive (top-level folders only).
-        - Skip ignored and empty folders.
-        - Resolve spaces in folder names to underscores at scan time.
-        - Read-only - never modify anything in the Plugins Folder.
-
-    Results are sorted by Plugin Name for deterministic ordering. If the
-    given path does not exist or is not a directory, returns an empty list -
-    higher layers surface detection errors; the scanner itself simply finds
-    nothing.
+    Non-recursive, so only top-level folders. Results are sorted by
+    Plugin Name. A path that does not exist or is not a directory
+    returns an empty list, and the scanner reports no error.
     """
     try:
         folder = Path(os.fspath(path))
@@ -190,14 +137,8 @@ def scan_folder(path: PathLike) -> List[Plugin]:
 
     for entry in scan:
         try:
-            # ``follow_symlinks=True`` (the default) so a TD who symlinks
-            # Plugin folders into a Plugins Folder
-            # (e.g. ``Global/plugins/Octopus -> /mnt/shared/.../Octopus``,
-            # or a user organising their plugin tree with symlinks) gets
-            # those Plugins discovered. With ``follow_symlinks=False`` every
-            # symlink-to-directory would be silently filtered. Broken /
-            # circular symlinks still naturally return False from ``is_dir``
-            # so the scanner doesn't get tricked into walking them.
+            # Default ``follow_symlinks=True``, so Plugin folders that are
+            # symlinks into a shared tree are still discovered.
             is_dir = entry.is_dir()
         except OSError:
             continue
@@ -206,20 +147,16 @@ def scan_folder(path: PathLike) -> List[Plugin]:
 
         folder_name = entry.name
 
-        # Skip ignored (non-Plugin) folders.
         if _is_ignored_folder(folder_name):
             continue
 
-        # Skip folders with no usable name.
         if not _is_naming_rule_valid(folder_name):
             continue
 
-        # Skip empty folders.
         entry_path = Path(entry.path)
         if not plugin_folder_has_content(entry_path):
             continue
 
-        # Spaces resolve to underscores in the Plugin Name.
         name = _resolve_plugin_name(folder_name)
 
         plugins.append(

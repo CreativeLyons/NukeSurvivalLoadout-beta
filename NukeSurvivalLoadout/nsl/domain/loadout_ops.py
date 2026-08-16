@@ -1,8 +1,8 @@
 """Loadout management operations - create / save / save_as / rename / delete /
 duplicate / switch_active / set_panic, plus a list helper for the panel.
 
-A loadout is a folder containing an ``init.py``; the dispatcher owns the
-``PANIC_MODE`` + ``ACTIVE_LOADOUT`` pointers. No JSON is used anywhere.
+A loadout is a folder containing an ``init.py``. The dispatcher owns the
+``PANIC_MODE`` and ``ACTIVE_LOADOUT`` pointers.
 
 On-disk layout this module manages::
 
@@ -11,34 +11,9 @@ On-disk layout this module manages::
       <loadout_name>/
         init.py            # one user loadout
 
-Public surface:
-    - ``OpResult`` - outcome of every op. Carries the on-disk folder path,
-      the resulting in-memory ``LoadoutModel`` (or ``None``), and the
-      resulting ``DispatcherState`` (or a ``Blocked`` reason).
-    - ``Blocked`` / ``BlockedReason`` - structured no-op result for policy
-      refusals (invalid name, source missing).
-    - ``create(...)`` - mkdir ``<name>/`` + write empty (or seeded) loadout
-      ``init.py`` + flip dispatcher.active to the new name.
-    - ``save(...)`` - write a ``LoadoutModel`` to ``<name>/init.py``.
-    - ``save_as(...)`` - write under a new name + flip dispatcher.active.
-    - ``rename(...)`` - ``os.rename`` the folder + update dispatcher.active
-      if the renamed loadout was active.
-    - ``delete(...)`` - ``shutil.rmtree`` the folder + fall back to the
-      first remaining loadout (alphabetical) or to no active pointer
-      (``""`` - Custom-as-first-run takes over in the panel) if none.
-    - ``duplicate(...)`` - ``shutil.copytree`` the folder under a new name
-      + flip dispatcher.active.
-    - ``switch_active(...)`` - write dispatcher with a new active pointer.
-    - ``set_panic(...)`` - write dispatcher with a new panic flag.
-    - ``list_loadouts(...)`` - sorted names of loadout folders containing
-      an ``init.py``.
-
-This module never imports ``nuke``. All writes flow through
-``nsl.boot.loadout_file.write_loadout`` and
-``nsl.boot.dispatcher.write_dispatcher`` (both atomic via
-``nsl.atomic_io``). The reserved ``Global`` name is rejected at the
-filename-rules layer; the dispatcher pointer always identifies a real
-loadout folder under ``<loadouts_dir>/``.
+Every write goes through ``nsl.boot.loadout_file.write_loadout`` or
+``nsl.boot.dispatcher.write_dispatcher``, both atomic. The reserved
+``Global`` name is rejected earlier, at the filename-rules layer.
 """
 
 from __future__ import annotations
@@ -106,9 +81,8 @@ class BlockedReason:
     INVALID_NAME = "invalid_name"
     SOURCE_NOT_FOUND = "source_not_found"
     NAME_COLLISION = "name_collision"
-    # Filesystem refused the mutation (Windows share locks on open
-    # folders, permission walls). The op did not complete; surfaced as a
-    # refusal instead of a raw traceback through the Qt signal layer.
+    # The filesystem refused the change, usually a Windows share lock or
+    # a permission wall. Returned as a refusal, never as a raw traceback.
     FS_ERROR = "fs_error"
 
 
@@ -125,15 +99,14 @@ class OpResult:
     """Outcome of an op.
 
     Attributes:
-        path: On-disk loadout *folder* path (not the init.py inside it).
-            ``None`` when the op did not target a single loadout folder
-            (panic toggle) or refused (Blocked).
-        model: The in-memory ``LoadoutModel`` after the op. ``None`` when
-            the op removed a loadout or only flipped the dispatcher.
-        state: ``DispatcherState`` after the op - reflects the active
-            pointer and panic flag the next Nuke launch will see.
-        blocked: ``Blocked`` instance when the op refused. When set, the
-            other fields carry the unchanged state.
+        path: The loadout folder, not the ``init.py`` inside it. ``None``
+            for a panic toggle or a refusal.
+        model: The ``LoadoutModel`` after the op. ``None`` when the op
+            removed a loadout or only touched the dispatcher.
+        state: The active pointer and panic flag the next Nuke launch
+            will see.
+        blocked: Set when the op refused. The other fields then carry
+            the unchanged state.
     """
 
     path: Optional[Path]
@@ -174,12 +147,9 @@ def read_dispatcher_state(loadouts_dir: PathLike) -> DispatcherState:
 def _existing_loadout_names(loadouts_dir: Path) -> list[str]:
     """Folders directly under ``loadouts_dir`` that contain an ``init.py``.
 
-    Dot- and underscore-prefixed folders are skipped: validated loadout
-    names can never start with ``.`` or ``_`` (see ``filename_rules``), so
-    such folders are never real loadouts. This keeps the in-flight delete
-    quarantine (``.<name>.nsl-trash-...``, which still holds an ``init.py``)
-    out of both the panel enumeration and the delete fallback picker, so a
-    quarantined folder can never be chosen as the new active pointer.
+    Folders starting with ``.`` or ``_`` are skipped, because a validated
+    loadout name never starts that way. This keeps the delete quarantine
+    out of the list, so it can never be picked as the new active pointer.
     """
     if not loadouts_dir.is_dir():
         return []
@@ -197,8 +167,6 @@ def _existing_loadout_names(loadouts_dir: Path) -> list[str]:
 def _validate_or_blocked(name: str) -> Union[str, Blocked]:
     """Run name validation and return the bare stem (or a Blocked refusal).
 
-    ``validate_filename`` returns bare stems under the runnable-python
-    architecture; loadouts are folders.
     """
     result = validate_filename(name)
     if not result.is_valid:
@@ -211,11 +179,9 @@ def _next_free_name(
 ) -> str:
     """Return the lowest-numbered non-colliding loadout folder name.
 
-    Collision matching is casefolded (see ``next_available_name``).
-    ``exclude`` removes one exact name from the taken set - rename
-    passes its own source name so a case-only rename (``foo`` ->
-    ``Foo``) lands on the new casing instead of being suffixed to
-    ``Foo_2`` by colliding with itself.
+    ``exclude`` drops one name from the taken set. Rename passes its own
+    source name, so a case-only rename (``foo`` to ``Foo``) lands on the
+    new casing instead of colliding with itself and becoming ``Foo_2``.
     """
     taken = set(_existing_loadout_names(loadouts_dir))
     if exclude is not None:
@@ -226,10 +192,9 @@ def _next_free_name(
 def _rmtree_force(path: Path) -> None:
     """``shutil.rmtree`` that clears the read-only attribute and retries.
 
-    On Windows, files copied from read-only media (or stamped read-only
-    by tooling) make plain ``rmtree`` raise where POSIX deletes. The
-    handler chmods the failing entry writable and retries that one
-    operation; anything still failing propagates to the caller.
+    On Windows a read-only file makes plain ``rmtree`` raise where POSIX
+    deletes. The handler makes that one entry writable and retries it.
+    Anything still failing propagates.
     """
 
     def _retry_writable(func, target, _exc):
@@ -239,8 +204,7 @@ def _rmtree_force(path: Path) -> None:
     if sys.version_info >= (3, 12):
         shutil.rmtree(path, onexc=_retry_writable)
     else:
-        # Pre-3.12 spelling: onerror receives an excinfo TUPLE (and is
-        # deprecated from 3.12, hence the branch above).
+        # Pre-3.12 spelling. ``onerror`` receives an excinfo tuple.
         shutil.rmtree(
             path,
             onerror=lambda func, target, excinfo: _retry_writable(
@@ -262,19 +226,9 @@ _quarantine_seq = itertools.count()
 def _quarantine_folder(folder: Path) -> Path:
     """Return a collision-proof quarantine destination for ``folder``.
 
-    Used by :func:`delete` to *move* the target out of the way before the
-    dispatcher pointer is rewritten, so the original is recoverable if that
-    write fails. The name is dot-prefixed (kept out of the panel's loadout
-    enumeration, which only lists folders holding an ``init.py`` under a
-    validated name) and carries the PID plus a per-process counter:
-
-        ``.<name>.nsl-trash-<pid>-<seq>``
-
-    A validated loadout name can never contain ``.nsl-trash-``, and the
-    ``<pid>-<seq>`` suffix is unique within and across concurrent processes,
-    so the quarantine destination cannot collide with a real loadout or with
-    another in-flight delete. The loop bumps the counter on the vanishingly
-    unlikely event a stale quarantine with the same name already exists.
+    The shape is ``.<name>.nsl-trash-<pid>-<seq>``. The leading dot keeps
+    it out of the loadout list, and the pid and counter keep two deletes
+    apart, even across processes.
     """
     parent = folder.parent
     while True:
@@ -298,11 +252,9 @@ def _state_with_panic(state: DispatcherState, panic: bool) -> DispatcherState:
 def _pick_fallback_active(loadouts_dir: Path, deleted_name: str) -> str:
     """Pick the next active pointer after ``deleted_name`` was removed.
 
-    First remaining loadout alphabetically, or ``""`` when none remain.
-    The empty pointer cascades through ``_active_strip_name`` to
-    Custom-as-first-run on the panel side; the dispatcher template's
-    ``if not PANIC_MODE and ACTIVE_LOADOUT:`` guard skips the
-    pluginAddPath cleanly so an empty pointer is safe at runtime.
+    The first remaining loadout alphabetically, or ``""`` when none are
+    left. An empty pointer is safe, because the dispatcher template
+    skips its ``pluginAddPath`` when ``ACTIVE_LOADOUT`` is empty.
     """
     remaining = sorted(
         name for name in _existing_loadout_names(loadouts_dir) if name != deleted_name
@@ -324,14 +276,9 @@ def create(
 ) -> OpResult:
     """Create a new loadout folder + init.py and switch the dispatcher to it.
 
-    When ``base`` is provided, its ``folders`` + ``plugins`` are copied
-    into the new loadout (the docstring + user-freeform sections are not
-    inherited - the new file gets a fresh canonical prefix). When
-    ``base`` is ``None``, the new loadout is empty (canonical prefix +
-    empty managed section).
-
-    On name collision the lowest-numbered suffix is appended via
-    ``next_available_name``.
+    With ``base``, its ``folders`` and ``plugins`` are copied over. The
+    user-written sections are not inherited and the new file gets a
+    fresh prefix. On a name collision a numbered suffix is appended.
     """
     validated = _validate_or_blocked(name)
     if isinstance(validated, Blocked):
@@ -351,10 +298,8 @@ def create(
 
     write_loadout(str(new_folder / LOADOUT_INIT_FILENAME), model)
     new_state = _state_with_active(state, new_name)
-    # The new folder already exists, so a failed pointer write needs no
-    # compensation - the old active loadout still resolves. Surface a
-    # structured refusal rather than letting OSError raise through the Qt
-    # signal layer as a traceback.
+    # The new folder is already on disk, so a failed pointer write needs
+    # no rollback. The old active loadout still resolves.
     try:
         _write_dispatcher(target_dir, new_state)
     except OSError as exc:
@@ -378,12 +323,8 @@ def save(
 ) -> OpResult:
     """Write ``model`` to ``<loadouts_dir>/<name>/init.py``.
 
-    Does not flip the dispatcher - Save means "commit the active
-    loadout's current state to disk." Use :func:`switch_active` to change
+    Does not touch the dispatcher. Use :func:`switch_active` to change
     which loadout the next Nuke launch loads.
-
-    The loadout folder is created lazily by ``write_loadout`` via
-    ``atomic_io.ensure_parent_dir``.
     """
     validated = _validate_or_blocked(name)
     if isinstance(validated, Blocked):
@@ -420,9 +361,7 @@ def save_as(
     )
     write_loadout(str(folder / LOADOUT_INIT_FILENAME), saved_model)
     new_state = _state_with_active(state, final_name)
-    # New folder already on disk; a failed pointer write leaves the old
-    # active loadout resolvable, so no compensation - just a structured
-    # refusal instead of an unguarded raise.
+    # Already on disk, so a failed pointer write needs no rollback.
     try:
         _write_dispatcher(target_dir, new_state)
     except OSError as exc:
@@ -471,8 +410,7 @@ def rename(
     try:
         os.rename(src_folder, new_folder)
     except OSError as exc:
-        # Windows refuses while any file inside is open elsewhere;
-        # surface as a refusal, not a traceback. Nothing changed on disk.
+        # Windows refuses while a file inside is open elsewhere.
         return OpResult(
             path=None,
             model=None,
@@ -483,12 +421,9 @@ def rename(
             ),
         )
 
-    # Transactional: the folder rename is already committed above. If the
-    # renamed loadout was active we must advance the dispatcher pointer too.
-    # Should that write fail, the folder change would otherwise persist with
-    # ACTIVE_LOADOUT still naming the (now gone) old folder - the active
-    # plugins would silently stop loading at next launch. So on a failed
-    # dispatcher write we rename the folder BACK and report FS_ERROR.
+    # The folder is already renamed. Rename it back if the pointer write
+    # fails. Otherwise ACTIVE_LOADOUT names a folder that is gone, and
+    # the plugins stop loading at next launch.
     new_state = state
     if state.active == current_name:
         new_state = _state_with_active(state, final_name)
@@ -544,11 +479,8 @@ def delete(
 ) -> OpResult:
     """Remove a loadout folder. If active, fall back to next loadout alphabetical.
 
-    When the deleted loadout is the active one, the dispatcher's active
-    pointer falls back to the first remaining loadout (alphabetical)
-    or to ``""`` when none remain. The dispatcher template skips its
-    pluginAddPath when ``ACTIVE_LOADOUT`` is empty, so writing the
-    empty fallback is always safe.
+    Deleting the active loadout moves the pointer on. See
+    :func:`_pick_fallback_active` for how the next one is chosen.
     """
     target_dir = Path(loadouts_dir)
     target_folder = target_dir / name
@@ -563,19 +495,14 @@ def delete(
             ),
         )
 
-    # Transactional delete. A plain rmtree-then-dispatcher-write would, on a
-    # failed dispatcher write, leave ACTIVE_LOADOUT pointing at a folder that
-    # no longer exists - the active plugins silently stop loading at next
-    # launch with nothing to recover. Instead we MOVE the folder to a
-    # recoverable quarantine name first, write the fallback pointer, and only
-    # then remove the quarantine. If the dispatcher write fails we move the
-    # folder BACK and report FS_ERROR; nothing is lost.
+    # Move the folder to a temporary name instead of deleting it. This way
+    # it can be restored if the dispatcher write fails.
     try:
         quarantine = _quarantine_folder(target_folder)
         os.rename(target_folder, quarantine)
     except OSError as exc:
-        # Open handles / permission walls (routine on Windows). The folder is
-        # untouched, the pointer is untouched, the survivors stay listable.
+        # Open handles or permission walls, routine on Windows. Nothing
+        # on disk changed.
         return OpResult(
             path=None,
             model=None,
@@ -593,14 +520,13 @@ def delete(
         try:
             _write_dispatcher(target_dir, new_state)
         except OSError as exc:
-            # Pointer write failed - restore the quarantined folder so the
-            # active loadout still resolves, and surface a refusal.
+            # Restore the quarantined folder so the active loadout still
+            # resolves.
             try:
                 os.rename(quarantine, target_folder)
             except OSError:
-                # Restore failed; leave the folder quarantined rather than
-                # risk a second partial move. It is recoverable on disk under
-                # the .nsl-trash- name.
+                # Restore failed, so leave the folder quarantined. It is
+                # still on disk under the .nsl-trash- name.
                 return OpResult(
                     path=None,
                     model=None,
@@ -627,10 +553,8 @@ def delete(
                 ),
             )
 
-    # Pointer is consistent (or never needed updating). Now drop the
-    # quarantined folder for real. A failure here leaves recoverable trash but
-    # the dispatcher is already correct, so the op still succeeded logically;
-    # best-effort cleanup, do not fail the op over leftover trash.
+    # The pointer is correct now, so drop the quarantine. A failure here
+    # only leaves recoverable trash, so it must not fail the op.
     try:
         _rmtree_force(quarantine)
     except OSError:
@@ -647,8 +571,8 @@ def duplicate(
 ) -> OpResult:
     """Copy a loadout folder under a new name. The new loadout becomes active.
 
-    Uses ``shutil.copytree`` so any user-authored files inside the source
-    folder (e.g., notes, sub-helpers) come along.
+    Uses ``shutil.copytree``, so any user files inside the source folder
+    come along too.
     """
     validated = _validate_or_blocked(new_name)
     if isinstance(validated, Blocked):
@@ -690,9 +614,7 @@ def duplicate(
         model = None
 
     new_state = _state_with_active(state, final_name)
-    # Copy already on disk; a failed pointer write leaves the old active
-    # loadout resolvable, so no compensation - structured refusal instead of
-    # an unguarded raise.
+    # Already on disk, so a failed pointer write needs no rollback.
     try:
         _write_dispatcher(target_dir, new_state)
     except OSError as exc:
@@ -716,10 +638,9 @@ def switch_active(
 ) -> OpResult:
     """Flip the dispatcher's active pointer to ``name``.
 
-    Refuses (``SOURCE_NOT_FOUND``) when the target loadout folder is
-    missing - switching to a non-existent loadout would silently leave
-    the user with no plugins next launch. The caller (panel) is
-    expected to enumerate via :func:`list_loadouts` first.
+    Refuses with ``SOURCE_NOT_FOUND`` when the folder is missing, which
+    would otherwise leave the user with no plugins next launch. Callers
+    should enumerate with :func:`list_loadouts` first.
     """
     target_dir = Path(loadouts_dir)
     folder = target_dir / name
@@ -754,8 +675,8 @@ def set_panic(
 ) -> OpResult:
     """Flip the dispatcher's panic flag.
 
-    Returns ``path=None`` and ``model=None`` - panic is a
-    dispatcher-level concern, not tied to any one loadout.
+    Returns ``path=None`` and ``model=None``, because panic belongs to
+    the dispatcher and not to any one loadout.
     """
     new_state = _state_with_panic(state, panic)
     _write_dispatcher(Path(loadouts_dir), new_state)
@@ -765,8 +686,7 @@ def set_panic(
 def list_loadouts(loadouts_dir: PathLike) -> list[str]:
     """Return the sorted list of loadout folder names under ``loadouts_dir``.
 
-    A loadout is any direct subfolder that contains an ``init.py``.
-    Folders without an init.py are ignored - the dispatcher would skip
-    them anyway, and surfacing them in the panel would mislead the user.
+    A loadout is any direct subfolder holding an ``init.py``. Folders
+    without one are ignored, because the dispatcher skips them anyway.
     """
     return sorted(_existing_loadout_names(Path(loadouts_dir)))
