@@ -20,7 +20,6 @@ from nsl.constants import (
 )
 
 
-# User-facing error strings for the loadout name rules.
 _ERR_DISALLOWED_CHARS = (
     "Loadout name can only contain ASCII letters, numbers, `-`, and `_`. "
     "Spaces are resolved to underscores. "
@@ -28,16 +27,13 @@ _ERR_DISALLOWED_CHARS = (
 )
 _ERR_LEADING_DOT_OR_UNDERSCORE = "Loadout name cannot start with `.` or `_`."
 _ERR_RESERVED_GLOBAL = "`Global` is a reserved name. Choose a different name."
-# `Custom` is NSL's auto-scratch slot - the loadout the user is dropped
-# into when they edit while Global is active. Reserving the name (any
-# case) keeps it usable as the wildcard. Users name their own loadouts
-# anything else.
+# NSL creates a Loadout called `Custom` itself and keeps it in memory.
+# The name is reserved in any case so a user Loadout cannot take it.
 _ERR_RESERVED_CUSTOM = (
     "`Custom` is a reserved name (NSL's auto-scratch loadout). "
     "Please choose another name than `Custom` or `Global`."
 )
 
-# Additional error strings; minimal-surprise wording.
 _ERR_EMPTY_STEM = "Loadout name cannot be empty."
 _ERR_STEM_TOO_LONG = (
     f"Loadout name cannot exceed {LOADOUT_FILENAME_MAX_STEM_LEN} characters."
@@ -52,11 +48,8 @@ _ALLOWED_STEM_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
 )
 
-# Windows reserved device names (any case): such a directory cannot be
-# created or opened through the normal Win32 namespace. Rejected on
-# EVERY platform - a loadout folder is portable data (synced dotfiles,
-# studio-shared setups), and a `con` folder created on macOS would be
-# unopenable on a Windows box.
+# Rejected on every platform, not only Windows. Loadout folders get
+# shared, and a `con` folder made on macOS cannot be opened on Windows.
 _WINDOWS_RESERVED_DEVICE_STEMS = frozenset(
     {"con", "prn", "aux", "nul"}
     | {f"com{i}" for i in range(1, 10)}
@@ -181,8 +174,6 @@ def next_available_name(base: str, existing: Iterable[str]) -> str:
     suffix = 2
     while True:
         suffix_part = f"_{suffix}"
-        # Reserve room for the suffix so the joined stem stays within the
-        # length cap; recomputed each pass since the digit count grows.
         budget = LOADOUT_FILENAME_MAX_STEM_LEN - len(suffix_part)
         candidate = f"{stem[:budget]}{suffix_part}"
         if (
