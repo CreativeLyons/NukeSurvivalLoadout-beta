@@ -1,35 +1,12 @@
 """Provenance-line wiring for the Loadout Panel's side panel header.
 
-The provenance line is a single muted line below the Plugin-name header on
-the Info and Log tabs. It identifies which Plugins Folder the Plugin is
-being read from and surfaces any pending change to its load state. There
-are five verbatim variants:
+The provenance line sits below the Plugin name on the Info and Log
+tabs. It names the folder the Plugin loads from and any pending change.
+:func:`compute_provenance` holds the five exact strings.
 
-1. ``Loaded from `<path>```
-   - Plugin loaded this session, nothing has changed.
-2. ``Loaded from `<path-a>` · Will load from `<path-b>` on next restart``
-   - a higher-priority folder now shadows the loaded copy; the next-startup
-   resolution will pick a different folder.
-3. ``Loaded from `<path>` · Disabled, will not load on next restart``
-   - Plugin is loaded but the user has disabled it in the active Loadout.
-4. ``Loaded from `<path>` · Source folder removed, will not appear on next restart``
-   - the Plugins Folder containing this Plugin has been removed.
-5. ``Not loaded this session · Will load from `<path>` on next restart``
-   - Plugin is enabled in the active Loadout but wasn't loaded at startup.
-
-This module owns one public helper - :func:`wire_provenance` - plus a tiny
-:class:`SessionContext` value object and a :func:`compute_provenance` pure
-formatter. :class:`ProvenanceController` re-renders the line on a Loadout
-switch, folder add / remove / reorder, any pill toggle, and a change to the
-restart-pending banner's visibility.
-
-The controller does not compose the prose itself: it asks the domain
-layer's :func:`nsl.domain.effective_state.resolve_effective` for the
-structured ``EffectiveState`` and routes the answer through
-:func:`compute_provenance`, the thinnest possible formatter mapping
-(resolver verdict + session context) onto one of the five variants. The
-layer choice, the source-folder origin tag, and whether a Loadout / Global
-entry exists are all read straight from the resolver's output.
+:class:`ProvenanceController` re-renders the line and never composes the
+prose. It reads the structural answer from
+:func:`nsl.domain.effective_state.resolve_effective`.
 
 Qt access goes through :mod:`nsl.compat` only.
 """
@@ -57,7 +34,7 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
-# Session-context value object - the non-resolver inputs the formatter needs.
+# Session-context value object
 # ---------------------------------------------------------------------------
 
 
@@ -65,36 +42,22 @@ __all__ = [
 class SessionContext:
     """The session-level facts the resolver does not carry.
 
-    The resolver answers *"what is the effective state of this Plugin?"*
-    and *"which layer supplied each field?"* but it has no opinion on
-    whether the Plugin was actually loaded at this Nuke startup, what
-    path it loaded **from** this session, or whether a folder later got
-    removed. These are session-runtime facts owned by the boot snapshot
-    + the user-folder list. The controller threads them in as a
-    :class:`SessionContext` per Plugin name; the formatter routes the
-    combination of resolver-output + session-context into exactly one of
-    the five canonical strings (locked wording).
+    The resolver says what the effective state is. It does not know
+    whether the Plugin loaded at this Nuke startup, which folder it
+    loaded from, or whether a folder was removed later.
 
     Attributes
     ----------
     loaded_this_session:
-        True iff the Plugin was actually picked up by this Nuke session's
-        bootstrap. False when the user has just enabled it (variant 5) or
-        when boot raced past it.
+        False when the user has just enabled the Plugin, or when boot
+        did not reach it.
     loaded_from_path:
-        The folder NSL recorded this Plugin as having loaded from at
-        startup. None when ``loaded_this_session`` is False.
+        ``None`` when ``loaded_this_session`` is False.
     will_load_from_path:
-        The folder NSL predicts the Plugin will load from on the next
-        Nuke restart. Equal to ``loaded_from_path`` in the steady-state;
-        differs when a higher-priority folder now shadows the loaded
-        copy (variant 2) or when the Plugin only becomes resolvable
-        after the user enables it (variant 5). None when no resolution
-        is possible (Plugin will not load on next restart at all -
-        e.g. disabled in active Loadout or source folder removed).
+        The folder predicted for the next restart. ``None`` when the
+        Plugin will not load at all.
     source_folder_removed:
-        True iff the Plugins Folder containing this Plugin has been
-        removed from the user's configured folder list (variant 4).
+        The Plugins Folder holding this Plugin is gone from the list.
     """
 
     loaded_this_session: bool
@@ -119,31 +82,12 @@ def _fmt_will_load(path: str) -> str:
 def compute_provenance(state: EffectiveState, context: SessionContext) -> str:
     """Format the provenance line for a Plugin.
 
-    Reads the structural decision from ``state`` (the
-    :class:`EffectiveState` returned by
-    :func:`nsl.domain.effective_state.resolve_effective`) and routes the
-    combination through to one of the five canonical variants
-    (locked wording).
-
-    Variant precedence:
-
-    1. Plugin not loaded this session AND will load on next restart →
-       variant 5 (*"Not loaded this session · Will load from `<path>` on
-       next restart"*). This is the just-enabled case.
-    2. Plugin loaded this session AND source folder removed → variant 4.
-    3. Plugin loaded this session AND not effective-enabled (will not
-       load) → variant 3 (*"Disabled, will not load on next restart"*).
-    4. Plugin loaded this session AND will load from a different folder
-       on next restart → variant 2 (*"Will load from `<path-b>` on next
-       restart"*).
-    5. Plugin loaded this session, steady-state → variant 1.
-
-    The formatter never makes a structural decision that the resolver
-    could have answered: it consults ``state.enabled`` for the disabled
-    leg (variant 3) - the same flag the resolver picked off the active
-    Loadout / Global / default stack. The folder paths come from the
-    :class:`SessionContext`, which the controller threads in from the
-    snapshot reader + the user-folder list.
+    The wording is locked. Checked in this order:
+      * Variant 5 - not loaded this session, will load next restart.
+      * Variant 4 - loaded, source folder removed.
+      * Variant 3 - loaded, not enabled, so it will not load again.
+      * Variant 2 - loaded, a different folder wins next restart.
+      * Variant 1 - loaded, nothing has changed.
     """
     # Variant 5 - Plugin is enabled but wasn't loaded at startup.
     if not context.loaded_this_session:
@@ -152,12 +96,8 @@ def compute_provenance(state: EffectiveState, context: SessionContext) -> str:
                 f"Not loaded this session · "
                 f"{_fmt_will_load(context.will_load_from_path)}"
             )
-        # Defensive fallback - Plugin is neither loaded nor scheduled.
-        # The five canonical variants don't cover this exact case; render
-        # the closest honest variant (variant 5 prefix only) without
-        # inventing wording. This is a no-op for v1 because the
-        # snapshot / scanner pair never produces this combo in
-        # practice, but the branch keeps the formatter total.
+        # Neither loaded nor scheduled. No variant covers this, so return
+        # the prefix alone rather than invent wording.
         return "Not loaded this session"
 
     loaded_path = context.loaded_from_path or ""
@@ -193,21 +133,16 @@ def compute_provenance(state: EffectiveState, context: SessionContext) -> str:
 # ---------------------------------------------------------------------------
 
 
-# Type aliases for the orchestrator-installable callbacks. Kept loose so
-# the wiring layer can hand in either bound methods or plain functions.
+# Loose on purpose, so a bound method or a plain function both fit.
 ContextProvider = Callable[[str], SessionContext]
 LoadoutProvider = Callable[[], "object"]
 
 
 class _BannerWatcher(compat.QtCore.QObject):
-    """Event filter watching the change-detected banner for show / hide.
+    """Event filter that reports banner show and hide.
 
-    The banner doesn't emit a ``visibility_changed`` signal - visibility
-    flips via ``setVisible`` from the banner-state wiring elsewhere. We
-    install an event filter that fires ``visibility_changed`` whenever
-    the banner widget receives a ``Show`` or ``Hide`` event so the
-    controller can re-render. (The banner's ``dismissed`` signal is also
-    connected; that path covers the user-initiated dismissal.)
+    The banner has no visibility signal. Visibility flips through
+    ``setVisible`` elsewhere, so watch the Show and Hide events instead.
     """
 
     visibility_changed = compat.QtCore.Signal()
@@ -216,36 +151,19 @@ class _BannerWatcher(compat.QtCore.QObject):
         et = event.type()
         if et == compat.QtCore.QEvent.Show or et == compat.QtCore.QEvent.Hide:
             self.visibility_changed.emit()
-        return False  # never consume - let the banner do its thing.
+        return False  # never consume - the banner still gets the event.
 
 
 class ProvenanceController(compat.QtCore.QObject):
-    """Listens for the four re-render triggers and repaints the side panel.
+    """Repaints the side-panel provenance line on every trigger.
 
-    Attached as ``panel._provenance_controller`` by :func:`wire_provenance`.
-    Holds no domain state of its own - every re-render fetches fresh
-    state from the configured providers and from
-    :func:`resolve_effective`. The controller exposes a small public
-    surface so rebuild paths can drive it deterministically:
+    Attached as ``panel._provenance_controller`` by
+    :func:`wire_provenance`. Holds no domain state. Every render reads
+    fresh values from the installed providers and from
+    :func:`resolve_effective`.
 
-    * :meth:`set_focused_plugin` - switch which Plugin the panel is
-      showing in the Info or Log tab. Triggers a re-render.
-    * :meth:`set_session_context_provider` - install / replace the
-      callback that returns a :class:`SessionContext` for a Plugin name.
-    * :meth:`set_loadout_provider` - install / replace the callbacks
-      that return the active user Loadout and the resolved Global
-      Loadout.
-    * :meth:`set_source_provider` - install / replace the callback that
-      returns the Plugins Folder origin tag for a Plugin name. Optional;
-      the resolver accepts ``None``.
-    * :meth:`bind_grid` - re-attach pill-toggle listeners after a grid
-      rebuild. Idempotent - disconnects any prior bindings before
-      re-attaching.
-    * :meth:`render_now` - synchronous re-render. Public so callers can
-      drive a render without firing a Qt signal.
-
-    All five wiring connections are signal → :meth:`render_now`; the
-    controller has no other slots.
+    Call :meth:`bind_grid` again after a grid rebuild, or pill toggles
+    stop re-rendering.
     """
 
     def __init__(self, panel) -> None:  # type: ignore[no-untyped-def]
@@ -258,13 +176,10 @@ class ProvenanceController(compat.QtCore.QObject):
         self._source_provider: Optional[Callable[[str], Optional[str]]] = None
         self._body_provider: Optional[Callable[[str], str]] = None
 
-        # Track which pill signals we've connected so :meth:`bind_grid`
-        # can detach them on the next rebuild. A list of (pill, slot)
-        # pairs; the slot is the same closure each time so disconnect
-        # matches.
+        # Kept so bind_grid can disconnect on the next rebuild. The slot
+        # is the same bound method each time, so disconnect matches.
         self._pill_connections: list[tuple[object, object]] = []
 
-        # Banner visibility watcher.
         self._banner_watcher = _BannerWatcher(self)
         if getattr(panel, "banner", None) is not None:
             panel.banner.installEventFilter(self._banner_watcher)
@@ -297,10 +212,10 @@ class ProvenanceController(compat.QtCore.QObject):
         self._source_provider = provider
 
     def set_body_provider(self, provider: Callable[[str], str]) -> None:
-        """Optional README / log text source. When absent re-renders
-        keep the existing body text and only refresh the provenance
-        line by re-emitting :meth:`SidePanel.show_info` /
-        :meth:`SidePanel.show_log` with the previously-shown body.
+        """Install the README or log text source.
+
+        Without it a re-render keeps the body already on screen and
+        refreshes the provenance line only.
         """
         self._body_provider = provider
 
@@ -309,18 +224,15 @@ class ProvenanceController(compat.QtCore.QObject):
     def bind_grid(self, grid=None) -> None:  # type: ignore[no-untyped-def]
         """Connect pill ``toggled`` signals on the current grid.
 
-        Idempotent - detaches any prior connections before re-attaching.
-        Call after :meth:`LoadoutPanel.rebuild_grid` so toggle-driven
-        re-renders survive a Loadout switch.
+        Idempotent. Call it after :meth:`LoadoutPanel.rebuild_grid`, or
+        toggle-driven re-renders stop after a Loadout switch.
         """
-        # Detach prior connections.
         for pill, slot in self._pill_connections:
             try:
                 pill.toggled.disconnect(slot)
             except (RuntimeError, TypeError):
-                # Pill may already be gone (rebuild_grid deletes the
-                # widget) or the signal may have been disconnected; both
-                # are benign at rebuild time.
+                # The pill may already be deleted, or already
+                # disconnected. Both are normal at rebuild time.
                 pass
         self._pill_connections.clear()
 
@@ -342,12 +254,10 @@ class ProvenanceController(compat.QtCore.QObject):
     # -- re-render ------------------------------------------------------
 
     def render_now(self) -> None:
-        """Synchronously recompute and apply the provenance line.
+        """Recompute and apply the provenance line now.
 
         No-op when no Plugin is focused or no context provider is
-        installed: the side panel keeps its current state. Can be called
-        directly to drive a deterministic render without firing Qt
-        signals through the dispatcher.
+        installed. The side panel then keeps its current state.
         """
         plugin = self._focused_plugin
         if plugin is None:
@@ -367,16 +277,12 @@ class ProvenanceController(compat.QtCore.QObject):
             else None
         )
 
-        # Domain layer is the source of truth for the structural decision.
         state = resolve_effective(plugin, loadout, global_loadout, source)
         context = self._context_provider(plugin)
         provenance = compute_provenance(state, context)
 
-        # Push into whichever content tab is currently targeted. The
-        # provenance line belongs on both Info and Log tabs with
-        # the same content; we re-emit ``show_info`` / ``show_log`` so
-        # the side-panel formatter (composed Markdown / HTML) stays the
-        # single owner of the rendered surface.
+        # Re-emit ``show_info`` and ``show_log`` so the side panel stays
+        # the one owner of the rendered text.
         side_panel = getattr(self._panel, "side_panel", None)
         if side_panel is None:
             return
@@ -414,13 +320,10 @@ class ProvenanceController(compat.QtCore.QObject):
     # -- private slots --------------------------------------------------
 
     def _on_pill_toggled(self, _enabled: bool) -> None:  # noqa: D401
-        """Slot for ``PluginPill.toggled`` - re-render regardless of
-        which pill toggled. A toggle on any pill changes the active
-        Loadout's effective state, which can change the focused
-        Plugin's provenance (e.g. an enable on a higher-priority
-        shadow). Re-rendering on every toggle is the conservative
-        contract; the per-Plugin filter could be added later if
-        repaint cost ever shows up in profiling.
+        """Re-render on any pill toggle.
+
+        A toggle on one pill can change the focused Plugin's provenance,
+        so the trigger is deliberately wide.
         """
         self.render_now()
 
@@ -433,37 +336,13 @@ class ProvenanceController(compat.QtCore.QObject):
 def wire_provenance(panel) -> None:  # type: ignore[no-untyped-def]
     """Install a :class:`ProvenanceController` on ``panel`` and wire it.
 
-    One helper per wiring module, called from a single
-    ``wire_<module>(self)`` line in
-    :meth:`nsl.ui.panel.LoadoutPanel._wire_signals`.
-    The helper:
+    Idempotent. A second call replaces the prior controller and removes
+    its event filter.
 
-    1. Constructs a :class:`ProvenanceController` and attaches it to
-       ``panel._provenance_controller``. Idempotent - calling
-       :func:`wire_provenance` a second time replaces the prior
-       controller cleanly (the QObject parent dance keeps Qt happy).
-    2. Connects the four re-render triggers to
-       :meth:`ProvenanceController.render_now`:
-
-       * ``panel.loadout_strip.loadout_selected`` (Loadout switch)
-       * ``panel.folder_card.add_folder_requested`` (folder added)
-       * ``panel.folder_card.remove_confirmed`` (folder removed)
-       * ``panel.folder_card.reorder_requested`` (folder reordered;
-         priority changes may flip variant 2 → variant 1 / vice versa)
-       * ``panel.banner.dismissed`` (restart-pending state dismissed)
-
-    3. Calls :meth:`ProvenanceController.bind_grid` so pill-toggle
-       re-renders are live on whatever grid the panel was constructed
-       with. Downstream grid rebuilds should call ``bind_grid`` again.
-
-    Providers (session-context, active Loadout, Global Loadout, source
-    tag, body text) are installed by separate orchestrator-side wiring
-    once the data layer is bound. The controller no-ops on
-    :meth:`render_now` until those are in place: this keeps the
-    snapshot path working without forcing a full data-layer stub.
+    The providers (session context, Loadouts, source tag, body text) are
+    installed elsewhere. Until then :meth:`render_now` is a no-op, so the
+    snapshot path works with no data layer.
     """
-    # Idempotent replace - if a prior controller exists, clean its
-    # event filter / parent links before installing the new one.
     existing = getattr(panel, "_provenance_controller", None)
     if existing is not None:
         try:
@@ -477,21 +356,16 @@ def wire_provenance(panel) -> None:  # type: ignore[no-untyped-def]
     controller = ProvenanceController(panel)
     panel._provenance_controller = controller
 
-    # Re-render triggers - all five wire to :meth:`render_now`.
+    # Re-render triggers.
     if getattr(panel, "loadout_strip", None) is not None:
-        # Loadout switch - payload is the new active Loadout name; the
-        # controller's render path reads from the loadout provider on
-        # each fire so we ignore the payload here.
         panel.loadout_strip.loadout_selected.connect(
             lambda _name: controller.render_now()
         )
 
     if getattr(panel, "folder_card", None) is not None:
         panel.folder_card.add_folder_requested.connect(controller.render_now)
-        # FolderCard's user-facing "remove" signal - emitted after the
-        # confirmation dialog returns Yes. The per-row ``remove_requested``
-        # is the pre-confirmation intent; the panel-level
-        # ``remove_confirmed`` is the "the row is gone" signal.
+        # ``remove_confirmed`` fires after the dialog returns Yes. The
+        # per-row ``remove_requested`` is only the intent, so avoid it.
         panel.folder_card.remove_confirmed.connect(
             lambda _path: controller.render_now()
         )
@@ -502,5 +376,4 @@ def wire_provenance(panel) -> None:  # type: ignore[no-untyped-def]
     if getattr(panel, "banner", None) is not None:
         panel.banner.dismissed.connect(controller.render_now)
 
-    # Bind pill-toggle listeners on the current grid. Idempotent.
     controller.bind_grid()
