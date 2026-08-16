@@ -1,26 +1,16 @@
 """Event wiring - connects UI widget signals to domain ops.
 
-The single public helper is :func:`wire_events`, called once after the panel
-is built. It connects the loadout strip, top toolbar, folder card, grid
-toolbar, search/tags strip, and grid pills to their domain-op handlers.
+:func:`wire_events` runs once after the panel is built. It reads all
+panel state from ``panel.registry``.
 
-``wire_events`` reads everything it needs from ``panel.registry`` - a state
-carrier attached at construction time. Routing all panel state through the
-registry keeps this module decoupled and Qt-light: it imports the pure-Python
-domain layer (``loadout_ops`` / ``folder_ops`` / ``undo_stack``) eagerly and
-pulls in Qt only lazily where strictly needed.
-
-Key behavior:
-* User edits (pill toggles, folder add/remove) mutate the active LoadoutFile
-  in memory only; nothing is written to disk until an explicit Save / Save As.
-  A toggle marks the loadout dirty (the ``(*)`` marker + enabled Save button).
-* Each single-pill toggle pushes exactly one undo entry on the active loadout's
-  per-loadout undo stack.
-* Plugins Folders are dispatcher-authoritative (global state, not per-loadout),
-  so folder add/remove/reorder always re-persist to the dispatcher and sync
-  into every loadout - including while the in-memory Custom slot is active.
-* Custom never persists as a loadout on its own; Save on Custom redirects to
-  Save As, and closing with pending Custom plugins prompts to save.
+* Pill toggles and folder edits change the active LoadoutFile in memory
+  only. Nothing reaches disk until Save or Save As, and a toggle marks
+  the Loadout dirty.
+* One single-pill toggle pushes one undo entry.
+* Plugins Folders live in the dispatcher, not in a Loadout. A folder
+  add, remove or reorder always writes the dispatcher and syncs every
+  Loadout, even while the in-memory Custom slot is active.
+* Custom never saves as a Loadout. Save on Custom redirects to Save As.
 """
 
 from __future__ import annotations
@@ -61,11 +51,7 @@ __all__ = ["wire_events"]
 
 
 def _registry(panel):
-    """Return ``panel.registry``; raise a friendly error if missing.
-
-    Used at signal-emission time so a misconfigured panel surfaces a clear
-    AttributeError rather than a cryptic Qt exception inside the slot.
-    """
+    """Return ``panel.registry``, or raise when none is attached."""
     reg = getattr(panel, "registry", None)
     if reg is None:
         raise AttributeError(
@@ -78,9 +64,7 @@ def _registry(panel):
 def _is_global_active(state: DispatcherState) -> bool:
     """True when no user loadout is the dispatcher's active pointer.
 
-    Empty pointer or the reserved ``Global`` stem both mean Global is
-    active. Mirrors the rule the boot dispatcher uses (skipping the
-    active pluginAddPath when ``ACTIVE_LOADOUT`` is empty / reserved).
+    An empty pointer or the reserved ``Global`` stem both mean Global.
     """
     return (
         not state.active
@@ -102,38 +86,18 @@ def _user_folder_entries(
 ) -> list[ChainPluginEntry]:
     """Build the user-folder exception lines for the managed block.
 
-    Pure (no ``nuke`` / Qt). UNION of two sources, scoped to the
-    STILL-CONFIGURED folders in ``folders``:
+    The union of two sources, limited to still-configured folders:
 
-    1. **Live scan** - every discovered plugin whose ``source`` matches a
-       configured folder's path and whose decision in ``active_plugins``
-       DIVERGES from the default (disabled / gui-only). Default-on plugins
-       emit no line (``nsl_load_folder`` scan-loads them at boot). This is
-       the historical behaviour.
+    1. Live scan. Every discovered plugin whose decision differs from
+       the default. A default-on plugin gets no line, because
+       ``nsl_load_folder`` scan-loads it at boot.
+    2. Carried deviations. On-disk lines for a plugin the scan did not
+       see, such as one on an unmounted share. Without this the decision
+       is lost and the plugin reloads default-on.
 
-    2. **Carried deviations** - any on-disk exception line in
-       ``base_entries`` whose plugin is ABSENT from the live scan but whose
-       source folder IS still configured (e.g. an unmounted share that was
-       momentarily unscannable at Save). Without this, an explicit
-       Disabled / GUI-only decision for such a plugin is silently dropped
-       and the folder sweep reloads it default-on at next boot.
-
-    The deviation's decision is re-resolved against ``active_plugins`` so an
-    in-memory toggle-back-to-default still drops the line; an absent active
-    entry falls back to the on-disk deviation verbatim. Folder identity is
-    the PATH (canon-compared), not the var name, so a reorder that shifts
-    which path a ``plugins_X`` var holds still maps each carried deviation
-    to the right configured folder. De-duped so a plugin present in BOTH
-    the scan and the on-disk file does not double-emit. A deviation whose
-    source folder is no longer configured is dropped (genuinely-removed
-    folders still prune - the Issue 4 interaction).
-
-    Mirrors the Global branch, which already reads names from the model
-    (``global_model.plugins``) rather than the live scan.
+    Folders are matched by canon path, not by var name, so a reorder
+    still maps each line correctly.
     """
-    # Map each configured folder's canon path -> its current var, and keep a
-    # per-var record of which plugin names the live scan already emitted so
-    # the carried-deviation pass can de-dup against them.
     path_to_var: dict[str, str] = {
         canon_for_compare(decl.path): decl.var for decl in folders
     }
@@ -142,7 +106,7 @@ def _user_folder_entries(
     new_entries: list[ChainPluginEntry] = []
     emitted_per_var: dict[str, set] = {}
 
-    # 1. Live scan: discovered plugins per configured folder (current path).
+    # 1. Live scan.
     for decl in folders:
         names = sorted(
             plugin_name
@@ -173,26 +137,23 @@ def _user_folder_entries(
                 )
             )
 
-    # 2. Carried deviations: on-disk exception lines whose plugin is absent
-    #    from the live scan but whose source folder is still configured.
+    # 2. Carried deviations.
     for entry in base_entries:
         if entry.folder_var == GLOBAL_PLUGINS_VAR_NAME:
-            continue  # Global overrides are handled by the global branch
+            continue  # the Global branch handles these
         if entry.name in discovered:
-            continue  # scan saw it -> pass 1 already decided its fate
+            continue  # pass 1 already decided it
         base_path = base_folder_paths.get(entry.folder_var)
         if base_path is None:
-            continue  # on-disk var no longer declared (defensive)
+            continue  # on-disk var no longer declared
         canon_path = canon_for_compare(base_path)
         if canon_path not in configured_canon:
-            continue  # folder removed from config -> prune the deviation
+            continue  # folder removed, so prune the deviation
         target_var = path_to_var[canon_path]
         seen = emitted_per_var.setdefault(target_var, set())
         if entry.name in seen:
-            continue  # already emitted (path matched a discovered plugin)
-        # Re-resolve the decision against the in-memory active model: an
-        # explicit toggle-back-to-default drops the line; an absent active
-        # entry keeps the on-disk deviation verbatim.
+            continue  # already emitted
+        # An absent active entry keeps the on-disk deviation as it is.
         decision = active_plugins.get(entry.name)
         if decision is None:
             disabled = entry.disabled
@@ -242,55 +203,31 @@ def _build_chain_model(
     stem: str,
     active_model: LoadoutFile,
 ) -> LoadoutModel:
-    """Build a SPARSE (exceptions-only) chain ``LoadoutModel``.
+    """Build a sparse, exceptions-only chain ``LoadoutModel``.
 
-    The rendered loadout ``init.py`` lists explicit ``nsl_pluginAddPath``
-    lines ONLY for plugins that deviate from the default - i.e. ones the user
-    turned off (``disabled``) or set to GUI-only (``gui``). Every default-on
-    plugin gets NO line: the rendered ``nsl_load_folder(<var>)`` scan loads
-    those at boot (see ``boot/loadout_file._render_managed_block``). This
-    matches the panel's existing sparse in-memory model - a default-on plugin
-    is "no entry", so a freshly-dropped plugin loads without marking the
-    loadout dirty.
+    The rendered init.py carries a line only for a plugin the user turned
+    off or set to GUI-only. A default-on plugin gets no line, and
+    ``nsl_load_folder`` loads it at boot. So a newly dropped plugin does
+    not mark the Loadout dirty.
 
-    We enumerate ``registry.discovered_plugins`` (mapped to folders via
-    ``Plugin.source``) but emit only the exceptions.
+    Global plugins get a block under ``global_plugins``, and only where
+    the decision differs from the resolved Global model. The renderer
+    writes no folder scan for that var.
 
-    Global plugins get their own block under the folder var named
-    ``global_plugins`` (the Global chain head re-binds that NAME to its
-    own resolved dir each boot; the absolute path literal written here
-    serves the file's user-land life). An entry is emitted only when the
-    user's decision DIVERGES from the resolved Global model - agreement
-    stays implicit, and the renderer writes no folder scan for this var
-    (the head owns baseline Global loading and skips exactly the names
-    this file mentions).
-
-    Trailing comments on existing on-disk exception lines are preserved.
-
-    The NSL prologue (imports + folder vars + helper) is authored fresh every
-    write: ``user_prefix`` is dropped so a folder add/remove always
-    re-declares the ``plugins_X`` vars. Genuine user content is still
-    preserved verbatim on both sides of the managed region: hand-authored
-    text ABOVE the NSL prologue markers rides in ``user_prologue`` and text
-    below the END marker rides in ``user_suffix``. Both are read back from
-    the on-disk model and carried forward unchanged (Issue 2 - the old code
-    zeroed user_prefix and, because a legacy parse folded the prologue text
-    into it, silently discarded any custom import/helper above the markers).
+    ``user_prefix`` is dropped so ``render`` re-declares the folder vars.
+    ``user_prologue`` and ``user_suffix`` carry the user's own text
+    forward unchanged, above and below the managed block.
     """
-    # On-disk model - read to preserve trailing comments AND to carry
-    # forward deviations whose plugin is momentarily unscannable (offline
-    # share). One entry-per-name lookup feeds the Global branch below.
+    # Read the on-disk model to keep trailing comments and to carry
+    # deviations for plugins the scan cannot see.
     target = _chain_loadout_path(registry, stem)
     try:
         base_model = read_chain_loadout(str(target))
     except (OSError, SyntaxError):
         base_model = LoadoutModel()
     on_disk_by_name = {entry.name: entry for entry in base_model.plugins}
-    # On-disk var -> path, so a carried deviation's folder_var resolves to
-    # its real folder even after a reorder shuffled the index-based vars.
     base_folder_paths = {decl.var: decl.path for decl in base_model.folders}
 
-    # One FolderDecl per configured user plugin folder, in configured order.
     user_dirs = list(getattr(registry, "user_plugin_dirs", []) or [])
     folders = [
         FolderDecl(var=folder_ops.canonical_folder_var(idx), path=path)
@@ -300,10 +237,6 @@ def _build_chain_model(
     active_plugins = active_model.plugins if active_model is not None else {}
     discovered = getattr(registry, "discovered_plugins", {}) or {}
 
-    # User-folder exception lines: UNION of the live scan with any on-disk
-    # deviation whose plugin is offline-but-still-configured. Scoped to the
-    # still-configured folders so removed folders still prune. See
-    # :func:`_user_folder_entries`.
     new_plugins: list[ChainPluginEntry] = _user_folder_entries(
         folders=folders,
         active_plugins=active_plugins,
@@ -312,9 +245,8 @@ def _build_chain_model(
         base_folder_paths=base_folder_paths,
     )
 
-    # Global-plugin overrides: one entry per divergence from the resolved
-    # Global model, under the ``global_plugins`` var. Declared only when
-    # there is at least one divergence to write.
+    # The ``global_plugins`` var is declared only when there is at least
+    # one divergence to write.
     global_model = getattr(registry, "global_model", None)
     global_dirs = list(getattr(registry, "global_plugin_dirs", []) or [])
     if global_model is not None and global_dirs:
@@ -348,10 +280,6 @@ def _build_chain_model(
         plugins=new_plugins,
         user_prefix="",
         user_suffix=base_model.user_suffix,
-        # Carry the hand-authored prologue forward so a panel Save preserves
-        # any custom Python the user placed above the NSL prologue markers
-        # (Issue 2). ``user_prefix`` stays empty so render() regenerates the
-        # NSL head from ``folders`` - no stale plugins_X decls.
         user_prologue=base_model.user_prologue,
     )
 
@@ -409,13 +337,11 @@ def _persist_active(registry, stem: str) -> Optional[loadout_ops.OpResult]:
 def _active_stack(registry) -> Optional[UndoStack]:
     """Return the undo stack for the active Loadout, or ``None`` for Global."""
     if not isinstance(registry.undo_stacks, UndoStackRegistry):
-        # Pure-Python tests may use a bare object; tolerate that.
         return None
     if _is_global_active(registry.state):
-        # Global has no on-disk identity; the auto-create flow flips the
-        # active Loadout *during* the op so the first-toggle undo entry
-        # lands on the newly-created Custom stack. We push the entry from
-        # the post-op state in :func:`_handle_op_result`.
+        # Global has no stack. The auto-create flow flips the active
+        # Loadout during the op, so :func:`_handle_op_result` pushes the
+        # first entry onto the new Custom stack.
         return None
     return registry.undo_stacks.for_loadout(registry.state.active)
 
@@ -428,17 +354,13 @@ def _active_stack(registry) -> Optional[UndoStack]:
 def wire_events(panel) -> None:
     """Connect ``panel`` widget signals to domain ops.
 
-    Called by the orchestrator's stitched ``_wire_signals`` extension. The
-    panel must already have ``panel.registry`` attached. Pills are wired
-    via :func:`rewire_grid_pills` so that grid rebuilds (loadout switch)
-    can re-attach signals without going through the full wiring pass.
+    ``panel.registry`` must already be attached. Pills go through
+    :func:`rewire_grid_pills`, so a grid rebuild can re-attach them
+    without a full wiring pass.
     """
     _wire_loadout_strip(panel)
     _wire_top_toolbar(panel)
     _wire_folder_card(panel)
-    # The grid_toolbar's select_all_requested / clear_selection_requested
-    # and search_tags's select_filtered_requested / deselect_filtered_requested
-    # signals are wired here so the selection controls mutate the grid.
     _wire_grid_toolbar(panel)
     _wire_search_tags_selection(panel)
     _wire_folder_engagement_clear(panel)
@@ -446,24 +368,16 @@ def wire_events(panel) -> None:
 
 
 def _wire_folder_engagement_clear(panel) -> None:
-    """Auto-clear engaged folder Select icons when the grid selection
-    diverges from what those icons promise.
+    """Clear engaged folder Select icons when the grid selection changes.
 
-    Once a folder's Select icon is engaged, selecting something directly in
-    the grid makes those icons no longer truthful, so they revert to default.
+    Once a folder's Select icon is engaged, a direct selection in the
+    grid makes the icon wrong, so it goes back to default.
 
-    The check is deferred via ``QTimer.singleShot(0, ...)`` so any
-    synchronous restore that follows a ``grid.set_keys`` (sort
-    rebuild, pipeline recompute, panel refresh) settles before we
-    compare expected vs. actual selection. Idempotent - multiple
-    queued checks in the same event-loop iteration all see the same
-    settled state and the first one to run clears (or no-ops);
-    subsequent ones see no engaged folders and short-circuit.
-
-    The folder-action guard (``panel._folder_select_action_active``)
-    short-circuits during ``_on_folder_select`` /
-    ``_on_folder_deselect`` so their own ``grid.select_keys`` calls
-    don't appear as "user manually changed selection."
+    The check is deferred with ``QTimer.singleShot(0, ...)`` so a restore
+    after ``grid.set_keys`` settles first.
+    ``panel._folder_select_action_active`` blocks the check during the
+    folder actions, so their own ``grid.select_keys`` calls do not look
+    like a manual change.
     """
     grid = getattr(panel, "grid", None)
     if grid is None or not hasattr(grid, "selection_changed"):
@@ -547,11 +461,8 @@ def _wire_search_tags_selection(panel) -> None:
         return
 
     def _filtered_keys() -> list:
-        # The pipeline's last_visible is the cached result of the most
-        # recent filter recompute. When no filter is active, it equals all
-        # current keys; when a query is typed, it's the matching subset.
-        # Reading this attribute avoids Select-filtered falling back to
-        # grid.keys() (== all pills) even with a filter active.
+        # ``last_visible`` is the matching subset after the last filter
+        # recompute. ``grid.keys()`` would select every pill instead.
         pipeline = getattr(panel, "filter_pipeline", None)
         if pipeline is not None:
             last = getattr(pipeline, "last_visible", None)
@@ -590,8 +501,6 @@ def _wire_loadout_strip(panel) -> None:
     strip.rename_requested.connect(lambda name: _on_rename(panel, name))
     strip.duplicate_requested.connect(lambda name: _on_duplicate(panel, name))
     strip.delete_requested.connect(lambda name: _on_delete(panel, name))
-    # Revert discards in-memory edits - destructive, so the handler asks
-    # for confirmation before calling ``registry.revert_active_to_baseline``.
     strip.revert_requested.connect(lambda name: _on_revert(panel, name))
     strip.save_requested.connect(lambda: _on_save(panel))
     strip.save_as_requested.connect(lambda: _on_save_as(panel))
