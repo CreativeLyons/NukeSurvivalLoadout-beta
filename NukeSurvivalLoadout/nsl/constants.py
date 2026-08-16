@@ -10,13 +10,8 @@ from pathlib import Path
 
 
 # -- Loadouts folder -------------------------------------------------------
-# Loadouts: where files live. Default save location is
-# ~/.nuke/loadouts/. Resolved at access time (not import time) so an
-# env change is picked up. NOT Path.home(): on Windows, Python 3.8+
-# Path.home()/expanduser ignore HOME (USERPROFILE only), while Nuke
-# itself resolves ~/.nuke from HOME first when set - nuke_user_dir()
-# mirrors Nuke's documented lookup so NSL and Nuke always agree on
-# which .nuke tree is live.
+# Default save location is ~/.nuke/loadouts/. Resolved when called, not
+# at import, so a changed HOME is picked up.
 
 
 NUKE_DIR_NAME = ".nuke"
@@ -26,22 +21,18 @@ LOADOUTS_DIR_NAME = "loadouts"
 def nuke_user_dir() -> Path:
     """The directory Nuke resolves ``~/.nuke`` under.
 
-    Mirrors Nuke's documented lookup order: ``HOME`` when set (on every
-    platform - including Windows, where Python 3.8+ ``expanduser`` no
-    longer consults it), otherwise the OS user profile via
-    ``expanduser``. On POSIX this is behavior-identical to plain
-    ``expanduser("~")``; empty ``HOME`` counts as unset.
+    Mirrors Nuke's lookup order. ``HOME`` first on every platform, which
+    matters on Windows where ``expanduser`` no longer reads it. An empty
+    ``HOME`` counts as unset.
     """
     home = os.environ.get("HOME")
     if home:
         return Path(home)
     if os.name == "nt":
-        # Windows expanduser ignores HOME entirely (USERPROFILE, then
-        # HOMEDRIVE+HOMEPATH) - exactly Nuke's fallback order.
+        # Matches Nuke's fallback: USERPROFILE, then HOMEDRIVE+HOMEPATH.
         return Path(os.path.expanduser("~"))
-    # POSIX with HOME unset or empty: skip expanduser (an empty HOME is
-    # echoed back and collapses to "/") and resolve from the account
-    # database directly.
+    # Skip expanduser here. With HOME empty it echoes back and collapses
+    # to "/", so read the account database instead.
     try:
         import pwd
 
@@ -61,59 +52,48 @@ def install_root() -> Path:
 
 
 # -- Loadout names ----------------------------------------------------------
-# Loadouts on disk are folders containing an init.py; names are bare
-# stems everywhere (the JSON-era `.loadout` extension is fully retired).
 
 LOADOUT_FILENAME_MAX_STEM_LEN = 100
 
-# `Global` is the reserved stem for the read-only Global layer row;
-# never written as a user loadout by NSL.
+# The read-only Global layer row. NSL never writes it as a user loadout.
 RESERVED_LOADOUT_STEM = "Global"
 
-# Defaults for auto-created and Save-As-with-no-name.
+# Used for the auto-created Loadout and for Save As with no name.
 DEFAULT_CUSTOM_LOADOUT_STEM = "Custom"
 
 
 # -- Global source marker -------------------------------------------------
-# Global Plugins (discovered in the Global plugins dir) record
-# their ``Plugin.source`` as this marker rather than the absolute Global
-# dir path, so the raw path never surfaces in the panel's
-# source/visibility grouping. The angle brackets guarantee it can never
-# collide with a real filesystem path. ``Plugin.path`` still holds the
-# real filesystem path for README lookups.
+
+# Global Plugins record ``Plugin.source`` as this marker, so the real
+# folder path never shows in the panel. The angle brackets cannot
+# collide with a real path. ``Plugin.path`` still holds the real path.
 
 GLOBAL_SOURCE_MARKER = "<global>"
 
 
 # -- Global folder-card marker --------------------------------------------
-# Plugins Folder management surface. The folder card lists
-# user-added Plugins Folders. When a Global layer is resolved (Global
-# Loadout has plugins), the card also surfaces a synthetic "Global"
-# row pinned to the bottom of the list so artists discover that
-# Global Plugins exist without leaking the raw folder path. The
-# row uses this marker string as its ``FolderEntry.path`` so the
-# wiring layer can recognise it (visibility map, select handler,
-# reorder filter) without confusing it for a real filesystem path.
+
+# The folder card shows a synthetic "Global" row when a Global layer
+# exists. The row carries this marker as its ``FolderEntry.path``, so
+# the wiring can tell it apart from a real folder.
 
 GLOBAL_PLUGINS_FOLDER_SENTINEL = "<NSL_GLOBAL_PLUGINS>"
 
 
 # -- Supported Nuke version range -----------------------------------------
-# Nuke version compatibility. NSL v1 supports Nuke 13 and
-# later. The floor matches the first Foundry release with Python 3 as a
-# supported runtime (VFX Reference Platform 2020).
+
+# The floor is Nuke 13, the first Foundry release with Python 3
+# (VFX Reference Platform 2020).
 
 SUPPORTED_NUKE_VERSION_MIN = 13
-SUPPORTED_NUKE_VERSION_MAX = None  # None => no upper bound; 13..
+SUPPORTED_NUKE_VERSION_MAX = None  # None means no upper bound
 
 
 # -- Global/ chain layer ---------------------------------------------------
-# The Global layer lives at ``<install>/Global/`` so it follows the
-# self-contained NSL install folder.
-# ``Global/init.py`` is the executable chain head; it declares two
-# redefinable folder vars and calls the NSL loader.
-# ``Global/Global_Loadout/init.py`` is the declarative Global Loadout -
-# parsed at boot, never executed in the Global role.
+
+# ``Global/init.py`` is the executable chain head. It declares the two
+# folder vars and calls the NSL loader. ``Global/Global_Loadout/init.py``
+# is declarative and is parsed at boot, never executed.
 
 GLOBAL_FOLDER_NAME = "Global"
 GLOBAL_PLUGINS_VAR_NAME = "global_plugins"
@@ -127,19 +107,14 @@ def global_dir() -> Path:
 
 
 # -- Ignored folders ------------------------------------------------------
-# Folders not treated as Plugins:
-#   - Folders starting with `_` (underscore).
-#   - Folders starting with `.` (dot).
-#   - `__pycache__/` and similar tooling outputs.
 
 PLUGIN_FOLDER_IGNORE_PREFIXES = ("_", ".")
 PLUGIN_FOLDER_IGNORE_NAMES = ("__pycache__",)
 
 
 # -- Empty-folder content rules -------------------------------------------
-# Files starting with `.` (dot) and
-# `Thumbs.db` do not count as content. `.gitkeep` is the one exception
-# that does count as content.
+
+# `.gitkeep` counts as content even though it starts with a dot.
 
 PLUGIN_NON_CONTENT_FILE_NAMES = ("Thumbs.db",)
 PLUGIN_NON_CONTENT_FILE_PREFIX = "."

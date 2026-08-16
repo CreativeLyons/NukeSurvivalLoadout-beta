@@ -1,38 +1,12 @@
 """Path-identity helper - comparison-only canonicalization.
 
-Windows (always) and default macOS APFS volumes are case-insensitive,
-case-preserving: ``C:/Plugins`` and ``c:/plugins`` name the same folder.
-``os.path.normpath`` unifies separators and dot segments but NOT case,
-so equality/membership tests on normpath output treat one folder as two
-whenever the case differs (drive-letter case from a file dialog vs. a
-hand-typed path, ``nuke.pluginPath()`` echoes, shell completions).
+Windows and default macOS APFS treat ``C:/Plugins`` and ``c:/plugins`` as
+one folder, but ``os.path.normpath`` does not fold case. Equality and
+membership tests on its output therefore see one folder as two.
 
-:func:`canon_for_compare` returns a single hashable string key suitable
-for dict keys, set membership, and equality. It case-folds that key only
-when the path lives on a case-insensitive volume:
-
-* Windows: ``os.path.normcase`` already lowercases (and swaps separators),
-  so it is used directly.
-* POSIX: ``os.path.normcase`` is the identity function, so it would treat
-  ``/p/Foo`` and ``/p/foo`` as two folders even on default (case-insensitive)
-  APFS. To match the documented contract we probe the path's volume:
-  - case-insensitive volume (default macOS APFS) -> ``str.casefold`` the
-    normpath result so case-only variants collapse to one key;
-  - case-sensitive volume (case-sensitive APFS, default Linux) -> identity,
-    because there ``Foo`` and ``foo`` really are two distinct folders.
-
-The probe result is cached per volume (by device id) so hot dedup loops do
-not stat on every call. The probe order is: named ``PC_CASE_SENSITIVE``
-pathconf when available, then the raw macOS ``_PC_CASE_SENSITIVE`` selector,
-then an empirical dual-name test (create a temp file, stat its case-flipped
-name, compare inodes). For a not-yet-created path we walk up to the nearest
-existing ancestor, since the new folder will live on the same volume as its
-parent. Any failure falls back conservatively (case-fold on macOS, identity
-elsewhere) and never raises - a comparison helper must not crash a dedup loop.
-
-The result is for EQUALITY AND MEMBERSHIP ONLY - never store it, never
-display it. Stored paths keep the user's original case (the filesystems
-are case-preserving and so is NSL).
+:func:`canon_for_compare` returns a hashable key that is case-folded only
+on case-insensitive volumes. Use it for comparison only. Never store it
+and never display it, because stored paths keep the user's own case.
 """
 
 from __future__ import annotations
@@ -46,35 +20,31 @@ __all__ = ["canon_for_compare"]
 
 PathLike = Union[str, "os.PathLike[str]"]
 
-# macOS ``_PC_CASE_SENSITIVE`` pathconf selector. Python's portable
-# ``os.pathconf_names`` does not expose it on every build, but the raw int is
-# still accepted by ``os.pathconf`` on Darwin, so we keep it as a fallback.
+# ``os.pathconf_names`` misses this on some macOS builds, but
+# ``os.pathconf`` still accepts the raw selector number on Darwin.
 _DARWIN_PC_CASE_SENSITIVE = 11
 
-# Per-volume cache of "is this volume case-insensitive?" keyed by device id
-# (``os.stat().st_dev``). A device id uniquely and stably identifies a mounted
-# volume, so we probe each volume at most once per process.
+# Keyed by device id (``os.stat().st_dev``), which identifies a mounted
+# volume, so each volume is probed at most once per process.
 _volume_case_insensitive: Dict[int, bool] = {}
 
-# Conservative default when the volume cannot be probed at all: default macOS
-# APFS is case-insensitive, so case-fold there; Linux's default is
-# case-sensitive, so keep identity. (Windows never reaches this code.)
+# Fallback when the volume cannot be probed. Default macOS APFS folds
+# case and default Linux does not. Windows never reaches this code.
 _DEFAULT_CASE_INSENSITIVE = sys.platform == "darwin"
 
 
 def _nearest_existing(path: str) -> Optional[str]:
     """Return ``path`` if it exists, else its nearest existing ancestor.
 
-    A not-yet-created folder lives on the same volume as its parent, so the
-    nearest existing ancestor is a valid stand-in for the case probe. Returns
-    ``None`` only if nothing on the chain (including the root) resolves.
+    A new folder lands on the same volume as its parent, so the ancestor
+    is a valid stand-in for the case probe. ``None`` if nothing exists.
     """
     p = os.path.abspath(path)
     while True:
         if os.path.exists(p):
             return p
         parent = os.path.dirname(p)
-        if parent == p:  # reached the root without finding anything
+        if parent == p:  # reached the root
             return None
         p = parent
 
@@ -82,9 +52,8 @@ def _nearest_existing(path: str) -> Optional[str]:
 def _probe_pathconf(existing: str) -> Optional[bool]:
     """Ask the OS whether ``existing``'s volume is case-insensitive.
 
-    Returns ``True`` (insensitive) / ``False`` (sensitive), or ``None`` when
-    the platform offers no ``PC_CASE_SENSITIVE`` answer. ``PC_CASE_SENSITIVE``
-    reports 1 for a case-sensitive volume, so insensitive is ``== 0``.
+    ``None`` when the platform has no answer. ``PC_CASE_SENSITIVE`` reports
+    1 for a case-sensitive volume, so insensitive is ``== 0``.
     """
     selector = os.pathconf_names.get("PC_CASE_SENSITIVE")
     if selector is None and sys.platform == "darwin":
@@ -100,11 +69,8 @@ def _probe_pathconf(existing: str) -> Optional[bool]:
 def _probe_empirical(existing: str) -> Optional[bool]:
     """Empirically test case-insensitivity by flipping a temp file's case.
 
-    Create a uniquely named temp file in ``existing`` (a directory), then stat
-    the same name with its basename case swapped. If the flipped name resolves
-    to the same inode the volume folds case; if it is absent the volume is
-    case-sensitive. Returns ``None`` when the test cannot be run (not a
-    writable directory, no cased characters to flip, etc.).
+    The same inode under the flipped name means the volume folds case.
+    ``None`` when the test cannot run, such as a read-only directory.
     """
     probe_dir = existing if os.path.isdir(existing) else os.path.dirname(existing)
     if not probe_dir or not os.path.isdir(probe_dir):
@@ -134,8 +100,7 @@ def _probe_empirical(existing: str) -> Optional[bool]:
 def _volume_is_case_insensitive(path: str) -> bool:
     """Whether ``path``'s volume folds case, cached per volume by device id.
 
-    Robust by construction: any probe failure falls back to the conservative
-    platform default, and the function never raises.
+    Never raises. Any probe failure falls back to the platform default.
     """
     try:
         existing = _nearest_existing(path)
@@ -164,14 +129,13 @@ def _volume_is_case_insensitive(path: str) -> bool:
 
 
 def canon_for_compare(path: PathLike) -> str:
-    """Canonical, hashable form of ``path`` for identity tests on
-    case-insensitive filesystems. Comparison-only; see the module docstring."""
+    """Hashable form of ``path`` for identity tests. Comparison only, see
+    the module docstring."""
     normalized = os.path.normpath(os.fspath(path))
     if os.name == "nt":
         # normcase already lowercases and swaps separators on Windows.
         return os.path.normcase(normalized)
-    # POSIX: normcase is identity, so fold case ourselves only when the
-    # path's volume is case-insensitive (default macOS APFS).
+    # ``normcase`` is the identity function on POSIX, so fold case here.
     if _volume_is_case_insensitive(normalized):
         return normalized.casefold()
     return normalized

@@ -1,12 +1,7 @@
 """NSL terminal logger.
 
-Public API:
-    loading(plugin_name)
-    warning(message)
-    critical_phase_failed(phase, exc)
-
-Output target is stdout only. v1 ships terminal output exclusively; persistent
-log files, log rotation, and log levels are out of scope.
+Writes to stdout only. There are no log files, no rotation, and no
+levels.
 """
 
 from __future__ import annotations
@@ -23,12 +18,9 @@ _WARNING_PREFIX = "NSL Warning:"
 def _write_stdout(text: str) -> None:
     """Write ``text`` to stdout, surviving non-UTF-8 stdout encodings.
 
-    Headless Linux sessions (LANG=C render farms) can resolve
-    ``sys.stdout.encoding`` to ASCII, where the ``✗`` prefix glyph or a
-    non-ASCII plugin name raises ``UnicodeEncodeError`` from inside the
-    logger - and a log call must never abort a boot pass (``loading()``
-    runs on the Global loader path with no exception wrapper). On encode
-    failure the line is re-emitted with unencodable characters replaced.
+    A LANG=C session can resolve stdout to ASCII, where the ``✗`` glyph
+    raises ``UnicodeEncodeError``. A log call must never abort a boot
+    pass, so the line is re-sent with bad characters replaced.
     """
     try:
         sys.stdout.write(text)

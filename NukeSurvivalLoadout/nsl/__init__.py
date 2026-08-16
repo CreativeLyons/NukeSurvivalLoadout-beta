@@ -1,9 +1,7 @@
 """NSL - Nuke Survival Loadout package root.
 
-Re-exports kept intentionally minimal. The ``compat`` submodule is NOT
-auto-imported here because its top-level code resolves PySide at import
-time; in headless boot NSL must not pull in Qt. UI code paths
-import it explicitly via ``from nsl import compat``.
+``compat`` is deliberately not imported here. It resolves PySide at
+import time, and a headless boot must not pull in Qt.
 """
 
 __version__ = "0.2.0"
