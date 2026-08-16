@@ -1,22 +1,11 @@
 """NSL self-recovery - phase-level try/except with cascade-on-failure.
 
-Public API:
-    run_phase(phase, func, *args, **kwargs) -> (ok, value)
-    phase(phase_name) -> context-manager (records failures, cascades)
-    boot_failed() -> bool
-    failed_phase() -> str | None
-    failure_exception() -> BaseException | None
-    reset() -> None  (clears the recorded failure state)
+`KeyboardInterrupt` and `SystemExit` always propagate, so the user can
+still abort Nuke. Once any phase fails, later phases skip their body and
+return at once. The panel reads the failure flag to show degraded mode.
 
-The wrapper is itself a universal `except Exception:` with two unconditional
-exclusions: `KeyboardInterrupt` and `SystemExit` ALWAYS propagate so the user
-can still abort Nuke. Cascade rule: once any phase records a failure,
-subsequent `run_phase` / `phase` calls skip their body and return immediately.
-A degraded panel can read the failure flag exposed here.
-
-Phase identity strings are free-form. Callers pass a short human-readable
-phrase (e.g. "Plugins Folder scan", "Loadout resolution"); the logger prefixes
-that string with `Phase: ` when emitting.
+Phase names are free-form. Pass a short phrase such as "Plugins Folder
+scan", and the logger prefixes it with `Phase: `.
 """
 
 from __future__ import annotations

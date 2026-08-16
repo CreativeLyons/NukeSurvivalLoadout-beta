@@ -1,17 +1,10 @@
 """NSL Nuke-version gate.
 
-Public API:
-    check_nuke_version() -> bool
+Reads ``nuke.NUKE_VERSION_MAJOR`` and returns ``False`` after printing a
+refusal line when the version is out of range.
 
-Reads ``nuke.NUKE_VERSION_MAJOR``. Returns ``True`` when the running Nuke is
-within the supported range; returns ``False`` after emitting a refusal line to
-the terminal logger.
-
-Refusal is a hard stop: the caller (NSL ``init.py``) short-circuits on
-``False`` so no panel registers and no further NSL code executes. Nuke
-continues to start normally without NSL.
-
-``KeyboardInterrupt`` and ``SystemExit`` propagate.
+A refusal is a hard stop. The caller registers no panel and runs no
+further NSL code, and Nuke starts normally without NSL.
 """
 
 from __future__ import annotations
@@ -38,8 +31,8 @@ def _emit_refusal(detected: object) -> None:
         f"Unsupported Nuke version: {detected}. "
         f"NSL v1 supports {_supported_range_label()}."
     )
-    # Routed through the logger's encoding-defensive writer: the refusal
-    # prefix carries the ✗ glyph, which must not raise on ASCII stdout.
+    # The refusal prefix carries the ✗ glyph. Go through the logger's own
+    # writer so it cannot raise on ASCII stdout.
     log._write_stdout(f"{log._FAILED_PREFIX} {line}\n")
 
 

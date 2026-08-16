@@ -1,29 +1,13 @@
 """User loadout init.py read/write/render.
 
-Responsibilities:
-  - Parse a user loadout file into a ``LoadoutModel`` (AST-driven, so a
-    user's hand-edits don't have to be byte-perfect to round-trip).
-  - Render a ``LoadoutModel`` back to canonical text: section ordering
-    is fixed; the managed block AND the prologue (imports + folder vars +
-    helper, wrapped in ``# === BEGIN/END NSL PROLOGUE ===`` markers) are
-    authored entirely by NSL and regenerated on every write.
-  - Preserve everything OUTSIDE the NSL-owned regions verbatim:
-    ``user_prologue`` (hand-authored text above the prologue markers) and
-    ``user_suffix`` (after the END-managed marker). Legacy files written
-    before the prologue markers existed carry their whole head verbatim in
-    ``user_prefix`` instead, and gain the prologue markers on next save.
-  - Atomic write via ``nsl.atomic_io.write_atomic``.
+Parsing is AST-driven, so hand-edits round-trip without being
+byte-perfect. NSL owns and regenerates the prologue and the managed
+block. Everything outside those markers is preserved verbatim.
 
-Non-goals:
-  - Validating that ``folder`` variables resolve to real paths
-    (loadout-time concern, not file-shape concern).
-  - Catching SyntaxError when parsing: that's the dispatcher's job.
-    ``read_loadout`` raises if the file isn't valid Python.
-  - Managing aliased calls. Only literal ``nsl_pluginAddPath(...)`` calls
-    are pulled into ``plugins``; anything else that lives inside the managed
-    block is intentionally dropped on re-render (the markers say "NSL owns
-    this region"). Aliased usage belongs *outside* the markers in
-    user_prefix/user_suffix.
+``read_loadout`` raises on invalid Python instead of catching it. Only
+literal ``nsl_pluginAddPath(...)`` calls inside the managed block are
+kept. Anything else in that block is dropped on re-render, so aliased
+calls belong outside the markers.
 """
 
 from __future__ import annotations
@@ -59,20 +43,14 @@ __all__ = [
 BEGIN_MARKER = "# === BEGIN NSL MANAGED PLUGINS ==="
 END_MARKER = "# === END NSL MANAGED PLUGINS ==="
 
-# Prologue markers wrap the NSL-authored file head (imports + folder vars +
-# helper). Everything ABOVE the BEGIN-prologue marker is hand-authored
-# user code that NSL must preserve verbatim across every rebuild; the body
-# BETWEEN the prologue markers is owned by NSL and regenerated from the
-# model's ``folders`` on each render. Files written before these markers
-# existed have no prologue pair: their whole head is treated as one
-# verbatim ``user_prefix`` blob (see ``_split_on_markers``), and the
-# prologue markers get added on their next save.
+# Everything above BEGIN is hand-authored and preserved. The body
+# between the markers is regenerated from the model's ``folders``.
+# Legacy files have no pair, so their whole head is one verbatim blob.
 BEGIN_PROLOGUE_MARKER = "# === BEGIN NSL PROLOGUE ==="
 END_PROLOGUE_MARKER = "# === END NSL PROLOGUE ==="
 
-# Pre-rename marker spelling. Accepted on read so loadout files written
-# before the rename still parse; they pick up the new markers on their
-# next save.
+# Pre-rename spelling, accepted on read. Those files pick up the new
+# markers on their next save.
 _LEGACY_BEGIN_MARKER = "# === BEGIN NSL MANAGED ==="
 _LEGACY_END_MARKER = "# === END NSL MANAGED ==="
 
@@ -89,9 +67,8 @@ LOAD_FOLDER_NAME = "nsl_load_folder"
 class PluginEntry:
     """One ``nsl_pluginAddPath(folder=<var>, name=<str>, ...)`` call.
 
-    ``trailing_comment`` is the user-authored ``# foo`` text (including the
-    leading ``#`` and any whitespace between code and comment, e.g.
-    ``"  # broken on 16.0"``). Empty string when no trailing comment.
+    ``trailing_comment`` is the user's ``# foo`` text, including the
+    ``#`` and the whitespace before it. Empty when there is none.
     """
 
     folder_var: str
@@ -105,8 +82,8 @@ class PluginEntry:
 class FolderDecl:
     """One ``plugins_X = '<abs path>'`` string assignment at file top.
 
-    Written with ``repr`` quoting; read back via AST, so either quote
-    style (including pre-fix double-quoted files) round-trips.
+    Written with ``repr`` and read back through the AST, so either quote
+    style round-trips.
     """
 
     var: str
@@ -120,10 +97,8 @@ class LoadoutModel:
     plugins: list[PluginEntry] = field(default_factory=list)
     user_prefix: str = ""
     user_suffix: str = ""
-    # Hand-authored text that sits ABOVE the NSL prologue markers - custom
-    # imports, helpers, comments the user placed before the generated head.
-    # Preserved verbatim across every Save / folder-sync rebuild. Empty for
-    # legacy files (no prologue markers); their head rides in ``user_prefix``.
+    # Hand-authored text above the prologue markers, kept verbatim on
+    # every save. Empty for legacy files, whose head rides in user_prefix.
     user_prologue: str = ""
 
 
@@ -138,10 +113,9 @@ _FOLDERS_HEADER = "# ─── Plugin source folders ─────────
 
 _HELPER_HEADER = "# ─── Plugin loading functions ─────────"
 
-# Session recording is the one piece that is NOT inlined: it only feeds
-# the NSL panel's Loaded counter, so a loadout running without NSL (file
-# copied to another machine, panic mode) loses nothing by skipping it.
-# The loaders below stay inline so the file is self-contained at boot.
+# Only session recording is imported, not inlined. It just feeds the
+# panel's Loaded counter, so a copied loadout loses nothing without it.
+# The loaders stay inline so the file works on its own at boot.
 _HELPER_DEF = (
     "import sys\n"
     "\n"
@@ -213,20 +187,14 @@ def _parse_source(source: str) -> LoadoutModel:
     """Parse the loadout source string. Public surface is ``read_loadout``."""
     user_prefix, managed_body, user_suffix = _split_on_markers(source)
 
-    # Within the pre-MANAGED region, peel the NSL prologue (imports + folder
-    # vars + helper) away from any hand-authored text that sits above it.
-    # ``user_prologue`` is that hand-authored text, preserved verbatim on
-    # render; ``prologue_body`` is the regenerable NSL head, parsed below for
-    # docstring + folder decls. Legacy files (no prologue markers) keep the
-    # whole region in ``user_prefix`` and leave ``user_prologue`` empty.
+    # ``user_prologue`` is the hand-authored text above the markers.
+    # ``prologue_body`` is the NSL head, parsed below for the docstring
+    # and folder decls.
     user_prologue, prologue_body, has_prologue_markers = _split_prologue(user_prefix)
 
-    # Outside the managed markers: parse with AST to pull docstring + folder
-    # decls. ``managed_body`` is parsed only for plugin entries. The folder
-    # decls and docstring come from the prologue body (or the whole prefix on
-    # legacy files) - never from ``user_prologue``, so a user-authored
-    # ``plugins_X = ...`` assignment above the prologue is left verbatim and
-    # not mistaken for a managed folder decl.
+    # Folder decls come from the prologue body, never from
+    # ``user_prologue``. A user's own ``plugins_X = ...`` above the
+    # markers stays verbatim and is not read as a managed decl.
     decl_source = prologue_body if has_prologue_markers else user_prefix
     prefix_tree = ast.parse(decl_source) if decl_source.strip() else ast.Module(body=[], type_ignores=[])
 
@@ -240,21 +208,15 @@ def _parse_source(source: str) -> LoadoutModel:
 
     plugins = _parse_managed_block(managed_body)
 
-    # Guard B (parse-time tolerance): drop any managed call whose folder_var
-    # isn't declared in this file. A dangling reference - e.g. left by a hand
-    # edit that deleted a folder var but not its calls - would be a boot-time
-    # NameError, and the dispatcher's compile() pre-check only catches
-    # SyntaxError, not NameError. Filtering here means the panel never
-    # round-trips such a reference back out, so write_loadout(read_loadout())
-    # can't re-emit a file that crashes Nuke.
+    # Drop any managed call whose folder_var is not declared here. A
+    # dangling reference would be a boot-time NameError, and the
+    # dispatcher's compile() check only catches SyntaxError.
     declared = {f.var for f in folders}
     plugins = [entry for entry in plugins if entry.folder_var in declared]
 
-    # When prologue markers ARE present the head is fully structured
-    # (user_prologue + regenerable folders/docstring), so ``user_prefix`` is
-    # cleared - render rebuilds the prologue from ``folders``. When they are
-    # ABSENT (legacy file) the whole head rides verbatim in ``user_prefix``,
-    # exactly as before, so nothing is lost on a file NSL has not re-saved yet.
+    # With markers, render rebuilds the head from ``folders``, so
+    # ``user_prefix`` is cleared. Without them the whole head rides in
+    # ``user_prefix`` verbatim and nothing is lost.
     parsed_user_prefix = "" if has_prologue_markers else user_prefix
 
     return LoadoutModel(
@@ -459,9 +421,7 @@ def _scan_trailing_comments(source: str) -> dict[int, str]:
     except (tokenize.TokenizeError, IndentationError):
         return trailing
 
-    # Track which lines have a non-comment, non-whitespace token before any
-    # comment on that line. Walk in order; when we see a COMMENT token,
-    # check whether any code token preceded it on the same line.
+    # Which lines carry a code token before any comment on that line.
     code_seen_on_line: set[int] = set()
     for tok in tokens:
         ttype = tok.type
@@ -484,10 +444,7 @@ def _scan_trailing_comments(source: str) -> dict[int, str]:
         srow = tok.start[0]
         if srow not in code_seen_on_line:
             continue
-        # Preserve the whitespace gap between code and the ``#``.
-        # tok.line includes the full source line; slice from end-of-code.
-        # Simpler approach: capture text from column where the comment
-        # starts, then prepend the spaces that sat between code and ``#``.
+        # Keep the whitespace gap between the code and the ``#``.
         source_line = tok.line
         comment_col = tok.start[1]
         # walk left from comment_col to find non-space code character
@@ -561,13 +518,9 @@ def _render_canonical_prefix(model: LoadoutModel) -> str:
     """
     parts: list[str] = []
     if model.docstring:
-        # repr, not a raw triple-quote wrap: the docstring is a parsed value
-        # (delimiters already stripped by ast.get_docstring), so a hand-edited
-        # docstring carrying its own ``"""``, a trailing quote, or a backslash
-        # would re-render as invalid Python if interpolated raw. Emitting it as
-        # a repr() string literal - the module's first statement - keeps it a
-        # valid docstring that round-trips back to the same value. Mirrors the
-        # repr() quoting used for folder paths and plugin names below.
+        # ``repr``, not a raw triple-quote wrap. The value already lost its
+        # delimiters. A docstring holding its own quotes or a backslash
+        # would otherwise re-render as invalid Python.
         parts.append(f"{model.docstring!r}\n\n")
     parts.append(_IMPORTS_BLOCK)
     parts.append("\n\n")
@@ -575,9 +528,8 @@ def _render_canonical_prefix(model: LoadoutModel) -> str:
     if model.folders:
         parts.append(f"{_FOLDERS_HEADER}\n")
         for folder in model.folders:
-            # repr, not a hand-rolled quoted literal: Windows paths carry
-            # backslashes ("C:\Users\..." is a SyntaxError as a plain
-            # double-quoted literal; "C:\temp" silently becomes a tab).
+            # ``repr``, not a hand-rolled literal. A Windows path like
+            # "C:\temp" would otherwise turn the \t into a tab.
             parts.append(f"{folder.var} = {folder.path!r}\n")
         parts.append("\n\n")
 
@@ -608,14 +560,9 @@ def _render_managed_block(model: LoadoutModel) -> str:
 
     folders_by_var = {folder.var: folder.path for folder in model.folders}
 
-    # Exception entries grouped by folder_var (preserve model order).
-    #
-    # Guard A (write-time validation): only entries whose folder_var is
-    # DECLARED in this file are emitted. An entry referencing an undeclared
-    # var is dropped rather than written: emitting its call (or a
-    # ``nsl_load_folder(undeclared)``) would be a boot-time NameError. Folder
-    # removal prunes such entries up-front via ``sync_folders``; this is the
-    # belt-and-suspenders that also neutralises a stray hand edit.
+    # Only entries whose folder_var is declared here are written. An
+    # undeclared var would be a boot-time NameError. ``sync_folders``
+    # already prunes these, so this also catches a stray hand edit.
     entries_by_var: dict[str, list[PluginEntry]] = {}
     for entry in model.plugins:
         if entry.folder_var in folders_by_var:
@@ -628,21 +575,18 @@ def _render_managed_block(model: LoadoutModel) -> str:
         call_lines = "".join(
             _render_plugin_call(entry) for entry in entries_by_var.get(var, [])
         )
-        # Group header only when there are explicit calls to group; the
-        # folder's absolute path already lives in its decl at file top.
+        # A header only when there are calls to group. The folder's path
+        # already sits in its decl at the top of the file.
         header = f"# Load plugins from {var}:\n" if call_lines else ""
-        # The Global plugins folder gets NO scan call: the Global chain
-        # head owns baseline loading of that folder and skips exactly the
-        # names this file mentions. A scan line here would load the whole
-        # Global folder from this file too - double-adding every name the
-        # file doesn't mention.
+        # The Global plugins folder gets no scan call. The Global head
+        # already loads it, so a scan here would add every unmentioned
+        # name a second time.
         if var == GLOBAL_PLUGINS_VAR_NAME:
             if call_lines:
                 blocks.append(f"\n{header}{call_lines}")
             continue
-        # The scan call gets its own commented line so the file reads clearly:
-        # explicit exceptions above, "everything else here, on" below. A blank
-        # line separates it from the exception calls when there are any.
+        # The scan call gets its own labelled line, so the file reads as
+        # named exceptions first and everything else after.
         scan_comment = f"# Auto-load every other plugin in {var}.\n"
         scan_line = f"{LOAD_FOLDER_NAME}({var})\n"
         sep = "\n" if call_lines else ""
@@ -690,7 +634,7 @@ def write_loadout(path: str, model: LoadoutModel) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Folder sync (dispatcher is the authority; loadouts hold a synced copy)
+# Folder sync. The dispatcher is the authority, loadouts hold a copy
 # ---------------------------------------------------------------------------
 
 
@@ -731,17 +675,12 @@ def sync_folders(
     silently losing the user's disabled / gui-only exceptions. This mirrors
     how ``folder_ops`` already compares folder identity.
     """
-    # Map canonical path-key -> the *old* path string, so a hit lets us look
-    # up the new var. When two of this model's decls canonicalize to the same
-    # key (e.g. a hand edit that left both "/a/b" and "/a/b/"), keep the first
-    # and skip the rest: silently overwriting would make the remap depend on
-    # decl order. The duplicate's entries still resolve via the first decl's
-    # path, since both share one canonical key.
+    # Keyed by canonical path so a hit gives the new var. On duplicate
+    # keys the first decl wins, because overwriting would make the remap
+    # depend on decl order.
     old_var_to_path = {f.var: f.path for f in model.folders}
 
-    # Map canonical path-key -> new var from ``canonical``. Same first-wins
-    # policy on duplicate canonical keys; the dispatcher should never hand us
-    # duplicates, but a defensive skip beats an order-dependent overwrite.
+    # Same first-wins rule. The dispatcher should never send duplicates.
     path_to_new_var: dict[str, str] = {}
     for decl in canonical:
         key = canon_for_compare(decl.path)
@@ -765,19 +704,10 @@ def sync_folders(
             continue  # folder removed from canonical - prune this entry
         new_plugins.append(replace(entry, folder_var=new_var))
 
-    # Reset user_prefix so render() rebuilds the NSL prologue from the NEW
-    # folder decls. Without this, render() emits the stale user_prefix
-    # verbatim (folder decls live there on a legacy round-trip), leaving the
-    # managed block referencing vars the prefix no longer declares - a
-    # dangling reference. Mirrors folder_ops._with_folders, which resets
-    # user_prefix for the same reason; the docstring is preserved via
-    # model.docstring.
-    #
-    # ``user_prologue`` is carried forward verbatim: it is the hand-authored
-    # text that lives ABOVE the NSL prologue markers (custom imports/helpers),
-    # NOT part of the regenerated head, so a folder add/remove must not drop
-    # it (Issue 2 - the old code zeroed only user_prefix and silently lost
-    # this text because legacy parses folded both into user_prefix).
+    # Reset user_prefix so render rebuilds the head from the new folder
+    # decls. A stale prefix would leave the managed block pointing at
+    # vars it no longer declares. ``user_prologue`` is carried forward,
+    # because it is the user's own text and not part of the rebuilt head.
     return replace(
         model,
         folders=[*canonical, *global_decls],
@@ -848,8 +778,8 @@ def sync_folders_to_loadouts(
     except OSError:
         return result
 
-    # Phase 1: stage. Render + validate every payload in memory; nothing is
-    # written until the whole set is known-good.
+    # Stage first. Render and check every payload in memory, and write
+    # nothing until the whole set is known good.
     staged: list[tuple[str, str, str]] = []  # (name, init_path, new_text)
     for name in names:
         init_path = os.path.join(loadouts_dir, name, "init.py")

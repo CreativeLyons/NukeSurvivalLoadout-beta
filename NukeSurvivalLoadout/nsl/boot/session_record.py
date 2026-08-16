@@ -1,9 +1,8 @@
 """Session load recording for the NSL panel.
 
-Loadout files import :func:`record_loaded` (aliased to ``_nsl_record``)
-inside a try/except and fall back to a no-op when NSL is absent. The
-record feeds the panel's Loaded counter (read in ``ui/registry.py``);
-it has no effect on what actually loads, so skipping it is always safe.
+Loadout files import :func:`record_loaded` inside a try/except and fall
+back to doing nothing when NSL is absent. The record only feeds the
+panel's Loaded counter, so skipping it is always safe.
 """
 
 from __future__ import annotations
@@ -18,9 +17,8 @@ from nsl.paths import canon_for_compare
 def record_global_dir(path: str) -> None:
     """Record the resolved Global plugins dir for this session.
 
-    Stamped by ``boot.global_loader.nsl_load_global`` at boot so the
-    panel reads the head's actual resolved value instead of re-deriving
-    it (the head is Python; a TD may compute the path dynamically).
+    Stamped at boot so the panel reads the value the head resolved. The
+    head is Python, so a TD may compute the path at runtime.
     """
     nuke._nsl_global_plugins_dir = os.path.normpath(path)
 
@@ -34,11 +32,8 @@ def recorded_global_dir() -> "str | None":
 def record_global_loadout_dir(path: str) -> None:
     """Record the resolved Global loadout dir for this session.
 
-    Stamped by ``boot.global_loader.nsl_load_global`` at boot so the
-    panel reads the head's actual resolved value instead of re-deriving
-    it (the head is Python; a TD may compute the path dynamically). The
-    panel's read-only Global model and its ``has_loadout_copy`` case-A/B
-    switch then match what boot actually loaded.
+    Stamped at boot so the panel reads the value the head resolved. The
+    read-only Global model then matches what boot actually loaded.
     """
     nuke._nsl_global_loadout_dir = os.path.normpath(path)
 
@@ -60,8 +55,7 @@ def record_loaded(name: str, path: str, gui: bool = False) -> None:
     if rec is None:
         rec = nuke._nsl_loaded_session = []
     norm = os.path.normpath(path)
-    # Dedup by case-folded identity (Windows/APFS are case-insensitive);
-    # the stored path keeps its original case for display.
+    # Dedup on the case-folded path. The stored path keeps its own case.
     key = canon_for_compare(norm)
     if any(canon_for_compare(item.get("path", "")) == key for item in rec):
         return

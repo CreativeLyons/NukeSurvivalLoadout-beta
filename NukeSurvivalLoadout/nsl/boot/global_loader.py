@@ -1,36 +1,16 @@
 """Global chain-head loader - boot-side loading for ``<install>/Global/``.
 
-``Global/init.py`` (the executable chain head) declares two folder paths
-and calls :func:`nsl_load_global`. The loader:
+``Global/init.py`` declares two folder paths and calls
+:func:`nsl_load_global`. The Global Loadout file is parsed, never
+executed, and nothing on disk is touched.
 
-  1. Resolves ``plugins`` / ``loadout`` relative to the head file's own
-     folder (``./`` and bare-relative entries anchor there; ``~`` expands;
-     absolute paths pass through unchanged).
-  2. If ``<loadout>/init.py`` exists it is PARSED, never executed, via
-     :func:`nsl.boot.loadout_file.read_loadout`. The folder
-     var named ``global_plugins`` binds to the freshly resolved plugins dir
-     in memory; other folder vars keep their written literals. Nothing on
-     disk is touched.
-  3. Reads ahead: the dispatcher at ``~/.nuke/loadouts/init.py`` names the
-     active user loadout; every plugin name that loadout will touch -
-     explicitly mentioned (enabled OR disabled) or visible in a declared
-     user folder it sweeps - belongs to the user's file and is skipped
-     here, so each plugin name is added by exactly one file per session.
-  4. ``nuke.pluginAddPath`` every enabled, unclaimed plugin folder,
-     honoring ``disabled`` / ``gui`` directives, and records each load plus
-     the resolved Global plugins dir via ``boot.session_record`` so the
-     panel reads boot-time truth.
-  5. With no loadout file, every plugin folder inside the plugins dir
-     loads (``_`` / ``.`` prefixed folders skipped), minus user-claimed
-     names. Zero-authoring default: drop plugins in, they all load.
+Plugin names the active user loadout will touch are skipped here, so
+each name is added by exactly one file per session. See
+:func:`_user_claimed_names`. With no Global Loadout file, every plugin
+folder in the plugins dir loads.
 
-Panic mode loads the Global layer in full with no claims: panic disables
-user-added plugins only (the dispatcher skips the active loadout), so the
-user's chain never runs and nothing is claimed.
-
-``import nuke`` happens lazily inside the load path so the parsing helpers
-(:func:`read_head_config`, :func:`resolve_global_path`) stay importable
-from panel-side code and headless contexts.
+``import nuke`` is lazy inside the load path, so the parsing helpers
+stay importable outside Nuke.
 """
 
 from __future__ import annotations
@@ -71,10 +51,10 @@ __all__ = [
 def resolve_global_path(entry: str, base_dir: str) -> str:
     """Resolve one head-declared folder path against the head's folder.
 
-    Rules (locked in the migration plan's decision log):
-      * ``./foo`` (and any non-absolute path) → relative to ``base_dir``.
-      * ``~/foo`` → home-expanded.
-      * absolute → as-is.
+    Rules:
+      * ``./foo`` and any non-absolute path resolve against ``base_dir``.
+      * ``~/foo`` is home-expanded.
+      * absolute paths pass through.
     """
     expanded = os.path.expanduser(entry)
     if not os.path.isabs(expanded):
@@ -93,23 +73,15 @@ def _default_head_dir() -> str:
 def _resolve_base(base: Optional[str]) -> str:
     """Return the folder the head's relative paths anchor to.
 
-    ``base`` may be the head file path (``Global/init.py`` passes its own
-    ``__file__``) or that file's folder. A file path resolves to its
-    containing folder; a folder passes through unchanged. The file-vs-folder
-    decision does not depend on the path existing on disk, so an explicit
-    ``base=__file__`` anchors the relative paths to the head's real location
-    no matter how deep the call stack is.
+    ``base`` may be the head file path or its folder. A file resolves to
+    its folder. The choice does not depend on the path existing, so
+    ``base=__file__`` works however deep the call stack is.
 
-    When ``base`` is ``None`` (a caller that passes nothing), the calling
-    file's location is derived from the caller's frame as a best-effort
-    fallback; if that fails, fall back to the shipped ``<install>/Global/``
-    location. The frame walk is the last resort - prefer passing ``base``.
+    With no ``base``, the caller's frame is used, then the shipped
+    ``<install>/Global/``. Prefer passing ``base``.
     """
     if base:
         base = os.path.abspath(os.path.expanduser(str(base)))
-        # Treat as a file (anchor to its folder) when it is a real file OR
-        # carries a filename suffix and is not an existing directory. This
-        # keeps ``base=__file__`` correct even if the file is not on disk.
         if os.path.isdir(base):
             return base
         if os.path.isfile(base) or os.path.splitext(base)[1]:
@@ -128,7 +100,7 @@ def _resolve_base(base: Optional[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Head file parsing (panel-side fallback; the head executes at boot)
+# Head file parsing. The panel's fallback, the head runs for real at boot
 # ---------------------------------------------------------------------------
 
 
@@ -136,11 +108,10 @@ def _resolve_base(base: Optional[str]) -> str:
 class GlobalHeadConfig:
     """The two folder declarations parsed out of ``Global/init.py``.
 
-    Both fields are RESOLVED absolute paths. Non-literal assignments
-    (e.g. an ``os.environ.get`` expression) can't be read statically;
-    the affected field falls back to the shipped default relative path.
-    At boot the head executes for real, so the session record carries
-    the true value - this parse is the panel's offline fallback.
+    Both fields are resolved absolute paths. A non-literal assignment
+    cannot be read statically, so that field falls back to the shipped
+    default. At boot the head really runs, so the session record holds
+    the true value and this parse is only the panel's fallback.
     """
 
     plugins_dir: str
@@ -191,27 +162,16 @@ def read_head_config(head_path: str) -> GlobalHeadConfig:
 def _user_claimed_names() -> frozenset:
     """Plugin names the active user loadout will load or suppress.
 
-    Two sources, mirroring exactly what the user chain touches at boot:
+    Two sources:
+      1. Every ``nsl_pluginAddPath`` entry, enabled or disabled.
+      2. Folder contents of every declared folder except
+         ``global_plugins``. Claiming that one would blank the whole
+         Global layer.
 
-      1. Explicit mentions - every ``nsl_pluginAddPath`` entry (enabled
-         OR disabled).
-      2. Folder-sweep contents - rendered loadout files sweep every
-         declared folder via ``nsl_load_folder`` EXCEPT the
-         ``global_plugins`` var (the Global head owns that folder's
-         baseline), so names visible in the other declared folders load
-         from the user chain even without an explicit mention. Walking
-         them here preserves "each plugin name is added by exactly one
-         file per session" when a user folder shadows a Global name
-         without mentioning it (preventing a sweep-shadow double-load).
-         The ``global_plugins`` var is excluded for the same
-         reason render skips its sweep: claiming it would blank the
-         whole Global layer (it broke case A test-driving when tried).
+    This keeps each plugin name added by exactly one file per session.
 
-    Reads (never executes) the dispatcher and the active loadout file.
-    First run (no dispatcher), Global-active, or panic mode all claim
-    nothing - in each case the user chain adds no plugins this session.
-    A declared folder that fails to list (unmounted share) contributes
-    nothing, so its Global-shadowed names fall back to the Global copy.
+    Reads, never executes. First run, Global active, and panic all claim
+    nothing. A folder that will not list contributes nothing.
     """
     user_loadouts = loadouts_dir()
     state = read_dispatcher(str(user_loadouts / "init.py"))
@@ -355,11 +315,9 @@ def nsl_load_global(
         try:
             model = read_loadout(loadout_init)
         except (OSError, SyntaxError):
-            # Deliberately SILENT at the terminal: boot output stays
-            # clean. The fallback below errs toward
-            # loading everything, so a TD typo cannot dark the studio;
-            # surfacing the unreadable-file condition in the PANEL
-            # (Global row status) is the tracked follow-up.
+            # Silent on purpose. The fallback below loads everything, so
+            # a typo in the Global Loadout cannot leave artists with no
+            # plugins.
             model = None
 
     if model is None:

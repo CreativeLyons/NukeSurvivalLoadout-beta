@@ -1,14 +1,8 @@
 """NSL boot-sequence verification.
 
-``nsl/init.py`` is not the loader. The four-file chain
-(``~/.nuke/init.py`` -> NSL middle -> loadouts dispatcher -> active
-loadout) walks via ``pluginAddPath`` only; Nuke does the actual loading.
-This module is a thin verification + log pass so the panel and
-diagnostics still have something to inspect.
-
-Public surface:
-    - ``BootResult`` - dispatcher state observed at boot.
-    - ``run_boot_sequence()`` - read the dispatcher, log, return.
+NSL is not the loader. The four-file chain only walks via
+``pluginAddPath`` and Nuke does the loading. This module just reads the
+dispatcher and reports, so the panel has something to inspect.
 """
 
 from __future__ import annotations
@@ -33,8 +27,6 @@ class BootResult:
 
 
 def _loadouts_init_path() -> str:
-    # constants.loadouts_dir() resolves HOME-first, matching Nuke's own
-    # ~/.nuke lookup on Windows (plain expanduser would not).
     return os.fspath(loadouts_dir() / "init.py")
 
 
@@ -47,19 +39,12 @@ def run_boot_sequence() -> BootResult:
         try:
             state = read_dispatcher(path)
         except Exception as exc:
-            # Real problem - a corrupt/unreadable dispatcher is worth a
-            # terminal line. The routine cases below are intentionally
-            # silent (see comment).
             log.warning(f"NSL dispatcher unreadable at {path}: {exc}")
             state = None
 
-    # Routine boot states are NOT logged to the terminal:
-    #   * dispatcher absent  -> normal first-run ("no loadouts yet"); the
-    #     panel guides the user. Not an error.
-    #   * dispatcher present -> normal every-launch state (panic/active);
-    #     diagnostic chatter, not signal.
-    # Both remain inspectable via the returned BootResult; only the
-    # genuine "unreadable" case above surfaces in stdout.
+    # Only the unreadable case above is logged. A missing dispatcher is a
+    # normal first run and a present one is the normal state. Neither is
+    # worth a terminal line, and both are readable from the BootResult.
 
     return BootResult(
         dispatcher_path=path,
