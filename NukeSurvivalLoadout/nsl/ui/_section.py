@@ -1,16 +1,11 @@
 """Shared section-bounding chrome.
 
-:class:`SectionBox` wraps any child widget and paints a 1 px rounded
-bounding line around it. Used at the panel-composition level to give
-every region (top toolbar, folder card, loadout strip, side panel,
-search/tags, grid, banner) a clearly visible boundary so the user can
-see at a glance where each section starts and ends.
+:class:`SectionBox` paints a 1 px rounded border around any child
+widget. The panel wraps each region in one.
 
-The border is painted in a custom :meth:`paintEvent` - **not** via QSS
- - because applying QSS to a parent widget pollutes child rendering
-(``QPushButton`` siblings drop out of native style sizing). See the
-:class:`HybridTextButton` lessons in :mod:`nsl.ui._buttons` for the
-prior incident this guards against.
+The border is painted in :meth:`paintEvent`, not in QSS. QSS on a parent
+widget drops child ``QPushButton`` siblings out of native style sizing.
+See :class:`HybridTextButton` in :mod:`nsl.ui._buttons`.
 """
 
 from __future__ import annotations
@@ -21,14 +16,12 @@ from nsl import compat
 class SectionBox(compat.QtWidgets.QFrame):
     """Wraps a child widget in a 1 px rounded panel border.
 
-    Construction injects the child into a margin-zero layout so the
-    border hugs the child exactly. The colour and radius are class
-    constants - change them in one place and every section updates.
+    Change ``BORDER_COLOR`` or ``RADIUS`` to restyle every section.
     """
 
     BORDER_COLOR = compat.QtGui.QColor("#2f2f2f")
     RADIUS = 4
-    INNER_PADDING = 2  # px breathing room between border and child content
+    INNER_PADDING = 2  # px gap between the border and the child
 
     def __init__(
         self,
@@ -52,9 +45,8 @@ class SectionBox(compat.QtWidgets.QFrame):
             pen = compat.QtGui.QPen(self.BORDER_COLOR, 1)
             painter.setPen(pen)
             painter.setBrush(compat.QtCore.Qt.NoBrush)
-            # Inset by 0.5 so the 1 px line draws inside our rect cleanly
-            # (centred on the pixel grid). Without this the line straddles
-            # the edge and renders at half-opacity on alternating pixels.
+            # Inset by 0.5 so the 1 px line sits on the pixel grid.
+            # Without it the line straddles the edge and looks faded.
             rect = compat.QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
             painter.drawRoundedRect(rect, self.RADIUS, self.RADIUS)
         finally:

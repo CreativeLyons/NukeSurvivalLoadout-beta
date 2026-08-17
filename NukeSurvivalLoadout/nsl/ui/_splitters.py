@@ -1,29 +1,8 @@
-"""Shared hairline-handle splitter classes for the NSL panel composition.
+"""Shared hairline-handle splitter classes for the NSL panel.
 
-Originally lived inside ``scripts/snapshot_panel_trio.py`` while the trio
-assembly was the iteration surface. Promoted out here so both the trio
-harness and the production panel (:mod:`nsl.ui.panel`) compose against
-the same handles + snap-back helper.
-
-Resize and collapse behaviour: active dividers paint 2 px
-``#5a5a5a`` (orange ``#ee9626`` on hover); locked dividers paint 1 px
-``#3a3a3a`` (no hover, arrow cursor). Snap-back uses ``splitterMoved``
-so the snap fires *during* drag, not on release.
-
-Two patterns are exported here:
-
-* :class:`HairlineSplitter` - :class:`QSplitter` subclass whose handles
-  paint a 1 / 2 px line centred inside a 6 px hit area. Combine with
-  ``setHandleWidth(6)``.
-* :func:`maybe_snap_splitter` - wire to ``splitterMoved`` to give a
-  splitter a snap-back zone around a target ratio. Set
-  ``splitter._snap_ratio = (left, right)`` and
-  ``splitter._snap_tolerance = 0.025`` to opt in.
-
-The transparent-handle QSS must be applied **to each splitter
-instance** (not to the panel root) so it doesn't pollute descendant
-native ``QPushButton`` rendering. See the QSS-cascade lessons in
-``.ai/LESSONS.md``.
+Apply ``HANDLE_QSS`` to each splitter instance, never to the panel root.
+QSS on the root breaks native ``QPushButton`` rendering below it. See
+the QSS-cascade lessons in ``.ai/LESSONS.md``.
 """
 
 from __future__ import annotations
@@ -39,26 +18,17 @@ __all__ = [
 ]
 
 
-# QSS to scrub the default splitter-handle fill so the custom
-# paintEvent's hairline reads alone. Apply per-splitter, NOT to root.
+# Clears the default handle fill so only the painted hairline shows.
 HANDLE_QSS = "QSplitter::handle { background: transparent; border: none; }"
 
 
 class HairlineHandle(compat.QtWidgets.QSplitterHandle):
-    """Splitter handle with a wide hit-area but a 1 / 2 px painted hairline.
+    """Splitter handle with a wide hit area and a 1 or 2 px hairline.
 
-    Qt's ``setHandleWidth(N)`` controls BOTH the painted strip and the
-    mouse hit area. To stay grabbable outside Nuke (where HybridStyle
-    isn't inflating hit areas for us) without making the divider look
-    fat, we keep the handle width at 6 px for grabbability and paint
-    only a thin line down the middle.
-
-    Enabled handles paint 2 px in ``#5a5a5a`` (orange ``#ee9626`` on
-    hover); disabled handles paint 1 px in ``#3a3a3a`` (no hover state)
-    so the user can tell at a glance which dividers will respond to a
-    drag. Pair ``setEnabled(False)`` on a locked handle with
-    ``setCursor(Qt.ArrowCursor)`` so the cursor doesn't tease an
-    interaction that won't happen.
+    ``setHandleWidth(N)`` sets both the painted strip and the mouse hit
+    area, so the handle stays 6 px wide and paints a thin line inside it.
+    Pair ``setEnabled(False)`` with ``setCursor(Qt.ArrowCursor)`` so the
+    cursor does not promise a drag that cannot happen.
     """
 
     _LINE_COLOUR = compat.QtGui.QColor("#5a5a5a")
@@ -114,8 +84,7 @@ class HairlineSplitter(compat.QtWidgets.QSplitter):
     """:class:`QSplitter` whose handles paint a centred hairline.
 
     Combine with ``setHandleWidth(6)`` for a grabbable hit area outside
-    Nuke. Inside Nuke's HybridStyle the hit area is inflated by the
-    style; the painted line stays a hairline regardless.
+    Nuke. Inside Nuke, HybridStyle inflates the hit area instead.
     """
 
     def createHandle(self):  # noqa: N802 - Qt override
@@ -125,17 +94,10 @@ class HairlineSplitter(compat.QtWidgets.QSplitter):
 def maybe_snap_splitter(splitter) -> None:
     """Snap-back helper for active splitter dividers.
 
-    Wire to ``splitter.splitterMoved`` so the snap fires *live during
-    drag*, not just on release. The user feels a brief "stick" while
-    passing through the target zone; dragging firmly outside the zone
-    breaks free. Reads ``splitter._snap_ratio`` (tuple of two ints,
-    interpreted as a proportional split) and
-    ``splitter._snap_tolerance`` (fractional, e.g. 0.025 = 2.5 %).
-    Splitters without ``_snap_ratio`` set are no-ops, so it's safe to
-    wire eagerly.
-
-    Uses ``blockSignals`` around the corrective ``setSizes`` call to
-    prevent the resulting signal from re-entering this handler.
+    Wire to ``splitter.splitterMoved`` so the snap fires during the drag,
+    not on release. Set ``splitter._snap_ratio``, two ints read as a
+    proportional split, and ``splitter._snap_tolerance``, a fraction, to
+    opt in. Without ``_snap_ratio`` it is a no-op.
     """
     snap_ratio = getattr(splitter, "_snap_ratio", None)
     if snap_ratio is None or len(splitter.sizes()) != 2:
