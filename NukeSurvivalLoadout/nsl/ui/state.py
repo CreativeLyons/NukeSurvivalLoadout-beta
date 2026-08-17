@@ -1,16 +1,11 @@
-"""Pure state-derivation helpers - domain shapes → widget-input shapes.
+"""Pure state-derivation helpers - domain shapes to widget inputs.
 
-Qt-free, no I/O on the hot path, no side effects beyond reading the
-loadouts directory (a deterministic function of its contents). The
-Registry layer calls these so `apply_op_result` can re-emit every
-widget's state from one place after a domain mutation.
+No Qt and no ``import nuke``. The only I/O is reading the loadouts
+directory. The Registry calls these so ``apply_op_result`` can re-emit
+every widget's state from one place.
 
-Each helper produces an existing widget-input type so wiring stays
-flat: no parallel hierarchy of "model" objects, no adapter layer
-inside the panel - the helpers feed `LoadoutStrip.set_loadouts`,
-`FolderCard.set_entries`, `Banner.set_state`, `PluginPill` directly.
-
-No ``import nuke`` and no Qt imports.
+Each helper returns an existing widget-input type, so the panel needs
+no adapter layer of its own.
 """
 
 from __future__ import annotations
@@ -41,11 +36,9 @@ __all__ = [
 
 @dataclass(frozen=True)
 class PendingDiff:
-    """Banner-state carrier returned by :func:`pending_diff`.
+    """Banner state returned by :func:`pending_diff`.
 
-    ``count == 0`` means the banner should be hidden; non-zero means
-    the panel calls ``banner.set_state(diff.kind, diff.count)`` and
-    ``banner.show()``.
+    ``count == 0`` means hide the banner. Anything else means show it.
     """
 
     count: int
@@ -61,47 +54,32 @@ def loadout_list_from(
     has_global_layer: bool = True,
     global_loadout_copy_exists: bool = False,
 ) -> List[Loadout]:
-    """Enumerate per-loadout folders into :class:`Loadout` rows.
+    """Enumerate the per-Loadout folders into :class:`Loadout` rows.
 
-    Under the runnable-python-loadout-chain architecture each user
-    Loadout is a folder ``<loadouts_dir>/<stem>/`` containing ``init.py``.
-    This helper lists those folders, applies dirty / Custom / Global
-    rules, and returns the strip-input list.
+    A subfolder of ``loadouts_dir`` counts as a Loadout when it holds an
+    ``init.py``. Row names are bare stems.
 
-    Row names are bare stems; the strip widget keys off the
-    ``GLOBAL_LOADOUT_NAME`` / ``CUSTOM_LOADOUT_NAME`` constants (bare
-    ``"Global"`` / ``"Custom"``). The JSON-era ``.loadout`` display
-    suffix is retired.
+    * User Loadouts come first, sorted by name.
+    * The ``Global`` row is synthesised last, from the Global resolver.
+      Any literal ``Global`` folder on disk is skipped.
+    * Custom is in-memory only, so an on-disk Custom folder is skipped
+      too. The row appears when Custom is active, has unsaved edits, or
+      no Global layer is configured.
+    * ``active_is_dirty`` puts ``(*)`` on the row matching
+      ``state.active``. ``dirty_stems`` puts it on the other rows.
+    * ``global_loadout_copy_exists`` hides the user-land
+      ``Global_Loadout`` row. That name is a staging area, not a
+      Loadout the user can activate.
 
-    Behaviour:
-        * Lists subfolders only - no file iteration.
-        * A folder counts as a loadout when it contains an ``init.py``;
-          empty / stub folders are ignored.
-        * Synthesises the ``Global`` row as the last row regardless of
-          whether a folder named ``Global`` exists; Global comes from
-          the Global resolver, not the user's loadouts dir.
-        * Any literal ``Global`` folder on disk is skipped (the
-          synthesised row supersedes it).
-        * Returns alpha-sorted user Loadouts followed by Global.
-        * ``active_is_dirty`` applies the ``(*)`` indicator on the row
-          whose stem matches ``state.active``.
-        * ``dirty_stems`` applies the ``(*)`` indicator on NON-active
-          rows whose stem appears in the set.
-        * ``global_loadout_copy_exists`` (case B - a ``Global_Loadout``
-          copy lives in the NSL Global folder) hides the user-land
-          ``Global_Loadout`` row: that name is then a staging area, not
-          an activatable loadout.
-
-    Returns the empty-state list ``[Global]`` when the dir doesn't
-    exist yet (first-run before any user Loadout has been saved).
+    When ``loadouts_dir`` does not exist yet, only the Custom and Global
+    rows that apply are returned.
     """
     parked = set(dirty_stems or ())
     from nsl.constants import DEFAULT_CUSTOM_LOADOUT_STEM
     custom_display = DEFAULT_CUSTOM_LOADOUT_STEM
 
     if not loadouts_dir.exists():
-        # The Global row exists iff a Global layer is configured.
-        # Without one, Custom is the home slot (first-run rule) and
+        # With no Global layer, Custom is the first-run home slot and
         # shows alone.
         rows: list[Loadout] = []
         custom_parked = DEFAULT_CUSTOM_LOADOUT_STEM in parked
@@ -127,15 +105,11 @@ def loadout_list_from(
         if child.name == RESERVED_LOADOUT_STEM:
             continue
         if child.name == DEFAULT_CUSTOM_LOADOUT_STEM:
-            # Custom is in-memory only - handled in the reserved slot
-            # below; ignore any on-disk Custom folder.
             continue
         if (
             global_loadout_copy_exists
             and child.name == GLOBAL_LOADOUT_DIR_NAME
         ):
-            # Case B: the staged user-land copy is hidden, never
-            # activatable; the Global row already represents it.
             continue
         if not (child / "init.py").is_file():
             continue
@@ -147,9 +121,6 @@ def loadout_list_from(
         else None
     )
 
-    # Visibility: Custom is hidden from the dropdown unless it's
-    # currently-active, carries parked edits, or no Global layer is
-    # configured.
     active_is_custom = state.active == DEFAULT_CUSTOM_LOADOUT_STEM
     custom_has_parked_edits = DEFAULT_CUSTOM_LOADOUT_STEM in parked
     show_custom = (
@@ -170,8 +141,8 @@ def loadout_list_from(
             )
         )
 
-    # Custom carries the (*) suffix when shown - the wildcard slot is
-    # unsaved by definition, not by value comparison.
+    # Custom always shows ``(*)``. The slot is unsaved by definition,
+    # not by value comparison.
     if show_custom:
         out.append(
             Loadout(
@@ -196,22 +167,12 @@ def folder_list_from(
 ) -> List[FolderEntry]:
     """Build :class:`FolderEntry` rows from ``user_plugin_dirs``.
 
-    The user's plugin source folders live as ``plugins_A``/``plugins_B``
-    vars at the top of the active loadout file. The Registry derives the
-    absolute-path list at construction time and threads it through
-    ``user_plugin_dirs`` so this pure helper stays free of model-shape
-    coupling.
+    ``visibility`` and ``health`` are session-only. Neither is
+    persisted. Defaults are visible and ``Health.HEALTHY``.
 
-    ``visibility`` and ``health`` are session-only - visibility is the
-    eye-toggle state owned by the panel (never persisted), health is
-    the latest scan result. Defaults: visible=True, health=HEALTHY.
-
-    When ``global_model`` is non-None AND carries plugins, appends a
-    synthetic ``FolderEntry`` for the resolved Global layer at the END
-    of the list - pinned-to-bottom so it always sits below user
-    folders (Global is the lowest-priority base layer).
-    ``global_plugins_dir`` feeds that row's tooltip (friendly label on
-    the row, full path on hover).
+    A ``global_model`` that carries plugins adds one more row at the
+    end, for the Global layer. It stays last, because Global is the
+    lowest layer. ``global_plugins_dir`` fills that row's tooltip.
     """
     vis = visibility or {}
     health_map = health or {}
@@ -245,18 +206,14 @@ def pending_diff(
     saved_baseline: Optional[LoadoutFile],
     kind: BannerKind = BannerKind.PENDING_CHANGES,
 ) -> PendingDiff:
-    """Count Plugin Names whose state diverges from the saved baseline.
+    """Count Plugin Names that diverge from the saved baseline.
 
-    The diff baseline is the active loadout's last-saved-on-disk state,
-    NOT the boot snapshot. When a loadout is
-    loaded (panel boot or switch) its on-disk state is the baseline;
-    Save advances the baseline; toggling pills in memory diverges from
-    it. Toggling on-then-off returns to baseline → count 0.
+    The baseline is the Loadout's last-saved-on-disk state, not the boot
+    snapshot. Save moves the baseline forward, so toggling a pill on and
+    off again gives a count of 0.
 
-    Effective state ignores entries with ``enabled=False`` (they
-    resolve to "not loaded" - equivalent to absence). A plugin counts
-    as a pending change iff its full effective entry (enabled +
-    gui_only) differs between baseline and current.
+    ``enabled=False`` counts as absent. A Plugin is a pending change
+    when its enabled and gui_only pair differs from the baseline.
     """
     baseline_eff = _effective_plugins(saved_baseline)
     current_eff = _effective_plugins(current_active)
@@ -275,12 +232,10 @@ def pending_diff_split(
 ) -> tuple:
     """Return ``(pending_add, pending_del)`` against the saved baseline.
 
-    ``pending_add`` - keys in current effective state but absent from
-    the baseline (will *load* on next Save). ``pending_del`` - keys in
-    the baseline but absent from current (will *unload* on next Save).
-    Sum may be < :func:`pending_diff` ``.count``: entries that are
-    still enabled but otherwise changed (e.g. ``gui_only`` flipped)
-    count toward ``pending_diff`` but neither add nor delete.
+    ``pending_add`` will load on the next Save and ``pending_del`` will
+    unload. The sum can be less than :func:`pending_diff` ``.count``. An
+    entry that stays enabled but changes ``gui_only`` counts there and
+    in neither of these.
     """
     baseline_eff = _effective_plugins(saved_baseline)
     current_eff = _effective_plugins(current_active)
@@ -292,13 +247,10 @@ def pending_diff_split(
 def _effective_plugins(
     model: Optional[LoadoutFile],
 ) -> Mapping[str, "PluginEntry"]:
-    """Drop ``enabled=False`` entries from a single loadout's plugins map.
+    """Drop ``enabled=False`` entries from one Loadout's plugins map.
 
-    ``enabled=False`` represents "not loaded" which is equivalent to
-    absence for divergence counting. Compares model-against-model
-    (current vs saved baseline) so Global resolution lives at the
-    caller - the saved-baseline cache already stores the resolved
-    snapshot for the Global pseudo-loadout.
+    For divergence counting, disabled is the same as absent. No Global
+    resolution happens here. The caller passes resolved models.
     """
     if model is None:
         return {}
@@ -324,23 +276,13 @@ def pill_state_from(
 ) -> PillState:
     """Compose a :class:`PillState` for ``plugin_name`` from domain state.
 
-    Resolution (sparse diff):
-        1. Active user Loadout's entry, if present.
-        2. Global Loadout's entry, if present.
-        3. Default ``PluginEntry(enabled=True, gui_only=False)``.
+    Sparse diff order: the active Loadout entry, then the Global entry,
+    then a default. The default is ``enabled=True``, except for a
+    user-added Plugin in the Global view, which defaults to off.
 
-    Status icon:
-        * ``enabled=False`` → :attr:`StatusIcon.EMPTY` (no icon).
-        * Without runtime info (``loaded_in_session is None``) →
-          :attr:`StatusIcon.LOADED` (optimistic placeholder; the loader
-          refines on attempt).
-        * With runtime info: ``True`` → LOADED, ``False`` + diagnostic
-          → FAILED, ``False`` without diagnostic → PENDING.
-
-    ``diverges_from_global`` only fires for GLOBAL pills whose
-    active Loadout override differs from the Global entry - the
-    grey-vs-purple border decision lives in the renderer based on
-    this flag.
+    ``diverges_from_global`` fires only for a GLOBAL pill whose active
+    Loadout override differs from the Global entry. The renderer turns
+    that flag into the purple border.
     """
     entry = None
     if active is not None:
@@ -353,15 +295,9 @@ def pill_state_from(
         Source.GLOBAL if plugin_name in global_set else Source.USER_ADDED
     )
 
-    # Panic re-attribution: while panic is engaged
-    # the user chain never runs, so a Global-resident name belongs to
-    # the Global layer for the whole session - even when a user folder
-    # shadows it or the active loadout overrides it. Resolve the entry
-    # from the GLOBAL model (sweep default: enabled) so the pill shows
-    # the live panic truth instead of a user override that cannot
-    # apply under panic. Observed lie this fixes: a user-disabled
-    # shadowed plugin that just loaded from Global rendered RED
-    # "pending disable" with a divergence dash while actually live.
+    # Under panic the user chain never runs, so resolve a Global name
+    # from the Global model. A user override cannot apply, and showing
+    # it makes a live Plugin read as pending disable.
     if panic_engaged and source is Source.GLOBAL:
         g_entry = (
             global_model.plugins.get(plugin_name)
@@ -371,30 +307,17 @@ def pill_state_from(
         entry = g_entry or PluginEntry(enabled=True, gui_only=False)
 
     if entry is None:
-        # Global-active honesty.
-        # When no user loadout is in play (``active is None`` →
-        # Global is the active "loadout"), user-added plugins
-        # default to disabled. Global is the read-only TD view;
-        # user plugins aren't part of it. Without this, the
-        # default-True fallback would graft every discovered user
-        # plugin onto the Global view, surface a phantom "+N would
-        # load on restart" banner against a slot the user can't
-        # save, and on next launch the boot loader (same default-True
-        # fallback via ``effective_state``) would actually load them
-        # - overriding the user's "I want just the Global view"
-        # selection. Global plugins always default to
-        # ``PluginEntry(enabled=True, gui_only=False)`` since the
-        # Global entry should have been the source of truth above
-        # (this branch only fires for Global when Global is
-        # somehow missing the entry; defensive).
+        # No entry in either layer. In the Global view user plugins
+        # default to off, because Global is the TD's read-only set. The
+        # same rule lives in ``effective_state``, so the panel and the
+        # loader agree.
         if active is None and source is Source.USER_ADDED:
             entry = PluginEntry(enabled=False, gui_only=False)
         else:
             entry = PluginEntry(enabled=True, gui_only=False)
 
-    # Divergence is suppressed under panic for the same reason as the
-    # entry re-attribution above: the user override cannot apply while
-    # panic holds, so flagging departure from Global would be noise.
+    # Suppressed under panic for the same reason as the re-attribution
+    # above.
     diverges = False
     if (
         source is Source.GLOBAL
@@ -412,81 +335,30 @@ def pill_state_from(
         diagnostic_available=diagnostic_available,
     )
 
-    # Pill body tint:
-    #
-    #     enabled=True,  status=LOADED      → NEUTRAL (no diff)
-    #     enabled=True,  status=other       → GREEN   (pending enable -
-    #                                                  will load next restart)
-    #     enabled=False, status=LOADED      → RED     (pending disable -
-    #                                                  will unload next restart)
-    #     enabled=False, status=other       → NEUTRAL (off, was never loaded)
-    #     status=FAILED or MISSING          → YELLOW  (problem state,
-    #                                                  overrides the green/red diff)
-    #
-    # Tint is the *session-truth-vs-restart-intent* signal: what was
-    # loaded this Nuke session vs what is enabled for the next restart.
-    # This is distinct from the change-detected banner's signal, which
-    # compares in-memory loadout edits against the loadout's last-saved-
-    # on-disk state (the "save your edits" signal). The two must NOT be
-    # collapsed: driving tint from saved_baseline instead would produce
-    # false-positive GREEN on every freshly-discovered plugin (no saved
-    # entry yet → reads as pending-enable) even when the status chip
-    # honestly says LOADED. Tint is *derived*, not stored: the wiring
-    # layer computes it at render time from the pair (enabled,
-    # status_icon).
+    # Tint compares this session against the next restart, not against
+    # the saved file. Driving it from ``saved_baseline`` would paint
+    # every freshly-discovered Plugin GREEN. See ``_derive_tint``.
     tint = _derive_tint(enabled=entry.enabled, status_icon=status_icon)
-    # Source-missing override - a plugin loaded this session whose
-    # source folder is no longer configured reads as "source gone."
-    # YELLOW hazard body is the canonical Missing signal; the pill
-    # renderer also paints a red border glow on top (via
-    # ``PillState.source_missing``) so the user reads "still loaded
-    # right now (green check), but the source is gone (yellow) and
-    # this won't load on next restart (red border)."
+    # The source folder is gone. YELLOW is the Missing body, and the
+    # renderer adds a red border from ``PillState.source_missing``.
     if source_missing:
         tint = Tint.YELLOW
 
-    # Dirty-vs-saved-on-disk - drives the "no glow" plain look while
-    # the user is toggling vs the colour-locked "committed
-    # pending-restart" glow once they save. Compare the pill's
-    # presence + value in M (active model) against its presence +
-    # value in D (saved-on-disk baseline).
-    #
-    # CRITICAL: compare EXPLICIT presence, not fallback-resolved
-    # values. A freshly-reconciled plugin (folder-add auto-enable)
-    # has an explicit ``(True, False)`` entry in M but no entry in D.
-    # If we resolved both sides through the same ``enabled=True``
-    # default, the explicit M would compare equal to the absent D and
-    # the pill would falsely glow green pre-save. The explicit/implicit
-    # distinction is the dirty signal itself: importing a folder marks
-    # the loadout dirty, but until the user saves, the newly-added pills
-    # must read as white-border unsaved, not green committed-pending.
-    #
-    # Global active (``active is None``) means there's nothing to be
-    # dirty about - Global is read-only.
+    # Compare explicit presence in the active model against the saved
+    # baseline, not the resolved values. A folder-add writes an explicit
+    # entry with nothing on disk to match it. Resolving both sides
+    # through one default would glow that pill green before a Save.
     is_dirty_vs_saved = False
     if active is not None and tint in (Tint.GREEN, Tint.RED):
         if active_is_custom:
-            # Custom-active honesty:
-            # Custom is the in-memory wildcard scratch slot - it cannot
-            # be saved to disk (Save redirects to Save As → named
-            # loadout). The committed-pending vocabulary (lime/red
-            # border + halo + "Saved Change" banner) would lie about
-            # a slot that can't commit. Force the dirty path for
-            # every pill while Custom is active so
-            # ``_pending_border_color()`` returns None across the
-            # board: divergent pills fall back to white barber-pole;
-            # solid-border pills skip the coloured border / halo in
-            # ``_paint_border`` step 6. The white pressed-glow still
-            # paints for any enabled pill (canonical pressed
-            # affordance - independent of save state).
+            # Custom never persists on its own, so no pill in it can be
+            # committed. Force the dirty path so the renderer skips the
+            # saved border and halo.
             is_dirty_vs_saved = True
         elif plugin_name in frozenset(force_dirty_plugins):
-            # Ceremonial-save set - this specific plugin is part of a
-            # re-confirm gesture (folder-add today). Treat as
-            # uncommitted so the visual matches the loadout's (*)
-            # and the enabled Save button. Other plugins not in the
-            # set still use value comparison below - so a folder-add
-            # doesn't blow away the saved-glow on unrelated pills.
+            # A folder-add marks its own plugins dirty, so the pill
+            # matches the ``(*)`` and the enabled Save button. Other
+            # pills keep the value comparison below.
             is_dirty_vs_saved = True
         else:
             m_explicit = plugin_name in active.plugins
@@ -496,19 +368,15 @@ def pill_state_from(
             )
             if m_explicit != d_explicit:
                 is_dirty_vs_saved = True
-            elif m_explicit:  # both explicit - compare values
+            elif m_explicit:
                 is_dirty_vs_saved = (
                     active.plugins[plugin_name]
                     != saved_baseline.plugins[plugin_name]
                 )
 
-    # GUI-only direction-of-change vs what loaded this session.
-    # ``session_gui_only`` = the plugin's GUI-only
-    # state in ``session_loaded_baseline`` (None = not loaded this
-    # session -> no GUI signal; the load wash owns that case).
-    # Enabled-only: a disabled plugin's GUI flag is moot. The load
-    # wash (enable/disable) takes precedence at the cell level (see
-    # panel refresh + grid CELL_DIFF_BG_GUI_ON_RGBA).
+    # ``session_gui_only`` is the gui_only flag of what loaded this
+    # session. None means the Plugin did not load, so there is no GUI
+    # signal. A disabled Plugin's GUI flag does not matter.
     gui_pending_on = False
     gui_pending_off = False
     if entry.enabled and session_gui_only is not None:
@@ -517,18 +385,10 @@ def pill_state_from(
         elif session_gui_only is True and entry.gui_only is False:
             gui_pending_off = True
 
-    # GUI-only commit state. ``gui_pending_on/off``
-    # above are the GUI analogue of body tint - they fire the moment the
-    # user toggles, saved or not. ``gui_committed`` is the GUI analogue
-    # of the lime/red saved-glow: True only when the GUI change is
-    # persisted to disk on a saveable slot, so it WILL apply on restart.
-    # It gates the committed-only visuals (purple cell wash off->on; red
-    # GUI-button border on->off); the pending visuals (lit-purple chip;
-    # red chip text) stay on the flags above so the user still sees the
-    # change while editing. Mirrors the ``is_dirty_vs_saved`` comparison
-    # - explicit presence + value, gui_only field only - so it never
-    # fires on Custom (can't save), Global (read-only, ``active is
-    # None``), a ceremonial-save pill, or an unsaved edit.
+    # ``gui_committed`` is True only when the GUI change is on disk and
+    # will apply on the next restart. It gates the committed visuals.
+    # The flags above drive the editing visuals. The comparison mirrors
+    # ``is_dirty_vs_saved``, on the ``gui_only`` field alone.
     gui_committed = False
     if (
         (gui_pending_on or gui_pending_off)
@@ -548,7 +408,7 @@ def pill_state_from(
             )
         elif not m_explicit and not d_explicit:
             gui_committed = True
-        # presence differs (m_explicit != d_explicit) → uncommitted → False
+        # Presence differs, so the change is not committed.
 
     return PillState(
         plugin_name=plugin_name,
@@ -573,11 +433,8 @@ def pill_state_from(
 def _derive_tint(*, enabled: bool, status_icon: "StatusIcon") -> "Tint":
     """Derive pill body tint from the (enabled, status) pair.
 
-    Tint is the **session-truth-vs-restart-intent** diff: what loaded
-    this Nuke session (status_icon) vs what is enabled for the next
-    restart (``entry.enabled`` resolved through sparse-diff).
-
-    Matrix:
+    Tint compares what loaded this Nuke session against what is enabled
+    for the next restart.
 
     ===============  ===========  ===============================
     ``enabled``      ``status``   Tint
@@ -590,10 +447,10 @@ def _derive_tint(*, enabled: bool, status_icon: "StatusIcon") -> "Tint":
     any              MISSING      YELLOW   (problem - overrides diff)
     ===============  ===========  ===============================
 
-    YELLOW dominates because a failed / missing plugin is a "needs the
-    user's attention" signal regardless of the pending-restart diff.
+    YELLOW wins, because a failed or missing Plugin needs attention
+    whatever the restart diff says.
     """
-    from nsl.ui.pill import Tint  # lazy - keeps import graph clean
+    from nsl.ui.pill import Tint
 
     if status_icon in (StatusIcon.FAILED, StatusIcon.MISSING):
         return Tint.YELLOW
@@ -611,24 +468,13 @@ def _derive_status_icon(
     loaded_in_session: Optional[bool],
     diagnostic_available: bool,
 ) -> StatusIcon:
-    """Status-icon derivation matrix (see :func:`pill_state_from`).
+    """Derive the status icon (see :func:`pill_state_from`).
 
-    Order matters here: ``loaded_in_session is True`` must be checked
-    **before** the ``not enabled`` shortcut. The pending-disable
-    case (``enabled=False`` + ``status=LOADED`` → RED tint) depends on
-    the icon honestly reporting "this plugin is currently loaded in
-    memory" even after the user has toggled it OFF for the next restart.
-    With the old ordering, ``not enabled`` returned EMPTY first and the
-    RED tint row was unreachable - every pending-disable read as
-    NEUTRAL. The ``_derive_tint`` step downstream computes the actual
-    GREEN / RED / NEUTRAL diff from the ``(enabled, status_icon)``
-    pair; this function's job is to make sure the status_icon carries
-    real session truth into that decision.
+    The icon reports what is in memory this session, not what the user
+    picked for the next restart. So ``loaded_in_session is True`` must
+    be checked before the ``not enabled`` shortcut. The other order
+    returns EMPTY first, and the RED pending-disable tint never fires.
     """
-    # Session truth wins - if the plugin is in memory this session,
-    # the icon says LOADED regardless of the user's pending enable
-    # toggle. The tint derivation then renders RED when enabled=False
-    # against a LOADED status (pending-disable signal).
     if loaded_in_session is True:
         return StatusIcon.LOADED
     if not enabled:
