@@ -4,7 +4,7 @@
 import time, and a headless boot must not pull in Qt.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from nsl import atomic_io, constants, log  # noqa: E402,F401
 

@@ -5,6 +5,19 @@ All notable changes to Nuke Survival Loadout are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-08-18
+
+### Changed
+
+- Comments and docstrings rewritten across all 62 modules to a shorter,
+  plainer standard. Comment volume is down by more than half and the
+  source is around 6,300 lines lighter, keeping the explanation that
+  earns its place and cutting what only restated the code.
+
+Documentation only. The executable code is unchanged, verified by
+comparing the syntax tree of every file before and after, so panel
+behaviour, loadout files, and the on-disk format are identical to 0.2.0.
+
 ## [0.2.0] - 2026-08-15
 
 ### Added
