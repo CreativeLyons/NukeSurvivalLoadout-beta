@@ -1,35 +1,11 @@
 """Per-session sort comparators for the Plugins grid.
 
-Eight sort modes; A -> Z is the universal secondary sort. Sort selection
-is panel-local and per-session and resets on Nuke quit.
+Eight sort modes. A -> Z is the secondary sort in every other mode.
+The sort choice is panel-local and resets when Nuke quits.
 
-This module provides:
-
-* :class:`SortableState` - a tiny dataclass collecting every attribute the
-  primary sort axes consult (enabled, GUI-only, selected, pending
-  change, warning, folder priority). The wiring layer
-  (:func:`wire_sort`) builds one of these per pill key by calling the
-  ``state_lookup`` callable installed on the panel.
-* :data:`COMPARATORS` - a mode -> key-function table. Each key function
-  returns a tuple whose first element is the mode's *primary* sort axis
-  and whose final element is the A -> Z secondary axis. ``Z -> A`` is the
-  one exception (the entire ordering *is* the alpha axis) and gets a
-  ``reverse=True`` flag.
-* :func:`sort_keys` - the public comparator dispatcher. Pure function:
-  given ``keys``, a :class:`SortMode`, and a ``state_lookup`` callable,
-  returns a new list in the requested order. Stable. Never mutates the
-  input.
-* :func:`wire_sort` - connects the grid toolbar's ``sort_mode_changed``
-  signal to the grid, re-rendering by composing filter then sort then
-  rebuild and preserving selection state across the swap. Sort scope is
-  panel-local and per-session: this helper writes nothing to disk and
-  reads nothing back, so a fresh Nuke session always opens with the
-  default ``A -> Z`` order.
-
-Qt imports go only via :mod:`nsl.compat`. The
-:class:`SortMode` enum and :data:`SORT_MODE_ORDER` are imported from
-:mod:`nsl.ui.grid_toolbar` (the toolbar widget is the
-canonical source of the labels; re-exporting from one place avoids drift).
+:class:`SortMode` and :data:`SORT_MODE_ORDER` are re-exported from
+:mod:`nsl.ui.grid_toolbar`, which owns the labels. Qt imports go
+through :mod:`nsl.compat`.
 """
 
 from __future__ import annotations
@@ -62,43 +38,21 @@ __all__ = [
 
 @dataclass(frozen=True)
 class SortableState:
-    """The minimum data each pill exposes to the sort axes.
+    """The per-pill data the sort axes read.
 
-    Seven independent axes plus the always-secondary ``name``:
-
-    * ``name``             - Plugin Name. Drives ``A -> Z`` / ``Z -> A``
-      directly and the secondary sort in every other mode. Across all
-      sort modes, the secondary sort is always alphabetical A -> Z.
-    * ``enabled``          - next-restart enabled state. Drives
-      ``Status``: enabled Plugins first.
-    * ``gui_only``         - ``True`` if the pill carries the GUI-only
-      bit (loads only in an interactive Nuke session, skipped in
-      terminal/render). Drives ``GUI-only``: unflagged ("loads
-      everywhere") Plugins first, flagged Plugins grouped below.
-      Read straight off the sparse-diff-resolved entry, so it matches
-      the pill's own GUI chip, which lights purely on ``gui_only``
-      regardless of enabled state.
-    * ``selected``         - current selection membership. Drives
-      ``Selected``: selected pills first.
-    * ``pending``          - ``"green"`` (will-add) / ``"red"`` (will-
-      remove) / ``None`` (no pending change). Drives ``Changed state``:
-      green first, then red, then unchanged.
-    * ``warning``          - ``True`` if the pill is in the load-
-      failed problem state (status icon FAILED). Drives the middle
-      bucket of ``Warnings``.
-    * ``missing``          - ``True`` if the pill is in the Plugin-
-      Scan-missing problem state (status icon MISSING). Drives the
-      top bucket of ``Warnings``: pills grouped into Missing above
-      Warnings (load-failed) above Clean.
-    * ``folder_priority``  - integer index into the Plugins Folder list
-      (lower = higher priority, matching the *Plugins Folder
-      Management* ordering). Drives ``Folder of origin``: folders
-      group in priority order.
-
-    The wiring layer builds one of these per pill key via the
-    ``state_lookup`` callable. The dataclass is frozen so a single
-    instance can be safely cached/shared between sort calls if the
-    caller wishes.
+    * ``name``            - drives ``A -> Z`` and ``Z -> A``, and the
+      secondary sort in every other mode.
+    * ``enabled``         - next-restart state. Drives ``Status``.
+    * ``gui_only``        - drives ``GUI-only``. Read off the
+      sparse-diff-resolved entry, so it matches the pill's GUI chip.
+    * ``selected``        - drives ``Selected``.
+    * ``pending``         - ``"green"``, ``"red"`` or ``None``. Drives
+      ``Changed state``.
+    * ``warning``         - load failed. Middle bucket of ``Warnings``.
+    * ``missing``         - not in the Plugin scan. Top bucket of
+      ``Warnings``.
+    * ``folder_priority`` - index into the Plugins Folder list. Lower
+      is higher priority. Drives ``Folder of origin``.
     """
 
     name: str
@@ -109,48 +63,29 @@ class SortableState:
     warning: bool = False
     missing: bool = False
     folder_priority: int = 0
-    folder_label: Optional[str] = None  # human-readable folder name for the
-    # ``Folder of origin`` divider header (basename of the folder path).
-    # Optional; ``None`` falls back to ``"Folder · ?"`` so callers that never
-    # set this field keep rendering predictably.
+    # Basename of the folder path, for the ``Folder of origin`` divider.
+    # ``None`` renders as ``"Folder · ?"``.
+    folder_label: Optional[str] = None
 
 
-#: Type of the ``state_lookup`` callable passed to :func:`sort_keys`.
-#: Given a pill key, return its :class:`SortableState`.
 StateLookup = Callable[[str], SortableState]
 
 
 # ---------------------------------------------------------------------------
 # Primary-axis key functions - one per mode, A → Z always secondary
 # ---------------------------------------------------------------------------
-#
-# Each function returns a tuple whose final element is the alphabetical
-# secondary axis (``name.lower()``). Booleans use the convention
-# ``not flag`` so that ``True`` sorts before ``False`` under ascending
-# sort. Strings already sort ascending without inversion.
-#
-# ``_key_gui_only`` is the deliberate exception - it passes the bare
-# flag so ``False`` (loads everywhere) leads and the GUI-only pills
-# group below. See its docstring for why.
-#
-# These functions consume *only* a :class:`SortableState`. The
-# dispatcher :func:`sort_keys` is the only place the lookup callable is
-# invoked, so each comparator stays trivially analysable in isolation.
 
 
 def _key_a_to_z(s: SortableState) -> Tuple:
-    """Primary axis: alphabetical ascending. No secondary (alpha IS the axis)."""
+    """Alphabetical ascending. There is no secondary axis."""
     return (s.name.lower(),)
 
 
 def _key_z_to_a(s: SortableState) -> Tuple:
-    """Primary axis: alphabetical descending.
+    """Alphabetical descending.
 
-    Implemented in the comparator (via ``reverse=True`` in
-    :func:`sort_keys`) rather than by inverting the key here, so the
-    *value* of the key remains the alphabetic axis. This keeps the
-    secondary-sort contract simple: when there is no secondary axis,
-    ``sort_keys`` simply reverses the alpha-ascending result.
+    Returns the ascending key. :func:`sort_keys` passes
+    ``reverse=True`` for this mode.
     """
     return (s.name.lower(),)
 
@@ -163,19 +98,12 @@ def _key_status(s: SortableState) -> Tuple:
 def _key_gui_only(s: SortableState) -> Tuple:
     """Primary axis: loads-everywhere first, then GUI-only. Secondary A → Z.
 
-    Note the inverted convention relative to every other boolean axis
-    in this module: the others use ``not flag`` to float the flagged
-    pills to the top, this one uses the bare flag so the *unflagged*
-    pills lead. GUI-only is the narrower, special-case population -
-    the everyday "loads everywhere" set reads as the baseline and the
-    GUI-only pills collect underneath it as the called-out group.
+    This axis passes the bare flag so the unflagged pills lead. Every
+    other boolean axis in this module uses ``not flag``.
 
-    Two buckets, split purely on the ``gui_only`` bit. Deliberately
-    independent of ``enabled``: the pill's GUI chip lights on
-    ``gui_only`` alone, so a disabled GUI-only Plugin still groups
-    with its own kind here. ``Status`` is the mode for slicing by
-    enabled, and keeping the two axes orthogonal means picking one
-    never half-answers the other.
+    The split ignores ``enabled``, so a disabled GUI-only Plugin still
+    groups with its own kind. ``Status`` is the mode for slicing by
+    enabled.
     """
     return (s.gui_only, s.name.lower())
 
@@ -188,9 +116,8 @@ def _key_selected(s: SortableState) -> Tuple:
 def _pending_bucket(pending: Optional[str]) -> int:
     """Map pending state to a sort bucket.
 
-    Pending-change pills first: green (will be added) at top, red (will be
-    removed) below green, then unchanged pills below those. So green=0,
-    red=1, none=2.
+    Green (will be added) is 0, red (will be removed) is 1, unchanged
+    is 2.
     """
     if pending == "green":
         return 0
@@ -207,12 +134,8 @@ def _key_changed_state(s: SortableState) -> Tuple:
 def _key_warnings(s: SortableState) -> Tuple:
     """Primary axis: Missing -> Failed -> Clean. Secondary A -> Z.
 
-    Three buckets: pills grouped into ``Missing`` above ``Warnings``
-    (load-failed) above ``Clean``. The triage view for "what needs my
-    attention this session." Missing wins over Failed because a Plugin
-    that disappeared from disk between snapshot and scan is a louder
-    signal than one that failed to load: the user's first move is
-    typically to confirm the folder is still mounted.
+    Missing ranks above Failed. A Plugin that left the disk needs the
+    user to check the folder first.
     """
     if s.missing:
         bucket = 0
@@ -224,19 +147,11 @@ def _key_warnings(s: SortableState) -> Tuple:
 
 
 def _key_folder_of_origin(s: SortableState) -> Tuple:
-    """Primary axis: folder priority (highest first). Secondary A → Z.
-
-    Lower ``folder_priority`` integer = higher priority, matching the
-    *Plugins Folder Management* list order (top of list = highest
-    priority).
-    """
+    """Primary axis: folder priority (highest first). Secondary A → Z."""
     return (s.folder_priority, s.name.lower())
 
 
-#: Mode -> primary key function. The dispatcher :func:`sort_keys` reads
-#: from here. Exporting the table (not just the dispatcher) makes each
-#: per-mode comparator usable on its own without going through the
-#: lookup-callable boilerplate.
+#: Mode -> primary key function. :func:`sort_keys` reads from here.
 COMPARATORS: Dict[SortMode, Callable[[SortableState], Tuple]] = {
     SortMode.A_TO_Z: _key_a_to_z,
     SortMode.Z_TO_A: _key_z_to_a,
@@ -261,18 +176,15 @@ def sort_keys(
 ) -> List[str]:
     """Return ``keys`` sorted under ``mode``.
 
-    Pure function. Never mutates ``keys`` or anything ``state_lookup``
-    returns. Stable: Python's Timsort preserves the input order for
-    ties beyond the comparator's tuple, which honours the rule that
-    across all sort modes the secondary sort is always alphabetical
-    A -> Z once the secondary axis is encoded in the tuple itself.
+    Pure and stable. Never mutates ``keys`` or anything
+    ``state_lookup`` returns.
 
     Args:
-        keys: Iterable of pill keys (typically the grid's current
-            full key list, or a filtered subset).
+        keys: Pill keys, usually the grid's full list or a filtered
+            subset.
         mode: One of the eight :class:`SortMode` members.
-        state_lookup: Callable mapping a key to its
-            :class:`SortableState`. Called exactly once per key.
+        state_lookup: Maps a key to its :class:`SortableState`. Called
+            exactly once per key.
 
     Raises:
         ValueError: ``mode`` is not a known sort mode.
@@ -283,10 +195,6 @@ def sort_keys(
     keys_list = list(keys)
     key_fn = COMPARATORS[mode]
 
-    # Pre-resolve states so the lookup is consulted exactly once per
-    # key. Ties on the primary axis fall back to the alpha secondary
-    # encoded in the tuple, and ties beyond that are broken by
-    # Timsort's stable ordering.
     decorated = [(key_fn(state_lookup(k)), k) for k in keys_list]
 
     reverse = mode is SortMode.Z_TO_A
@@ -302,51 +210,31 @@ def sort_keys(
 def wire_sort(panel) -> None:
     """Connect the grid-toolbar sort dropdown to the grid.
 
-    Looks at ``panel.grid_toolbar.sort_mode_changed`` and on each change
-    re-renders the grid in the new order, composed after the filter
-    pipeline and preserving the current selection.
+    On each ``sort_mode_changed`` the grid re-renders in the new order,
+    after the filter and with the selection preserved.
 
-    Composition contract:
+    1. Visible keys come from ``panel.filter_visible_keys()`` if it is
+       installed, otherwise from ``panel.grid.keys()``.
+    2. Sort with ``panel.sort_state_lookup`` if it is installed,
+       otherwise with a default that sorts on name alone.
+    3. Capture the selection, call ``panel.rebuild_grid(new_keys)``,
+       then re-apply the selection.
 
-    1. Resolve the *visible* keys - call
-       ``panel.filter_visible_keys()`` if installed, otherwise fall back
-       to ``panel.grid.keys()``.
-    2. Apply :func:`sort_keys` to the visible keys using
-       ``panel.sort_state_lookup`` if installed, otherwise a permissive
-       default that returns a vanilla :class:`SortableState` (so the
-       only consulted axis is the alpha secondary - safe for the
-       initial wire-up before the real state lookup is installed).
-    3. Capture the current selection from ``panel.grid``.
-    4. Call ``panel.rebuild_grid(new_keys)`` to swap the grid.
-    5. Re-apply the captured selection on the rebuilt grid.
-
-    Sort state is per-session and panel-local. This helper deliberately
-    does not read or write any persistence surface: a fresh Nuke session
-    opens with the toolbar's default ``A -> Z`` and nothing here changes
-    that.
-
-    The helper also stashes ``panel._current_sort_mode`` so other
-    wiring helpers (filter, selection) can re-trigger a sort by simply
-    calling ``panel._resort_grid()`` without having to query the
-    dropdown directly. This is the only state the helper introduces
-    on the panel; it is panel-local and reset every Nuke session
-    because the panel is destroyed and recreated each session.
+    Writes ``panel._current_sort_mode`` and ``panel._resort_grid`` so
+    the filter and selection helpers can re-trigger a sort. Nothing is
+    persisted, so a new Nuke session opens on ``A -> Z``.
     """
 
     toolbar = panel.grid_toolbar
 
-    # Initial mode - the toolbar's current value (default ``A → Z``).
     panel._current_sort_mode = toolbar.current_sort_mode()
 
     def _default_state_lookup(key: str) -> SortableState:
         """Permissive lookup used until the real one is installed.
 
-        Returns a vanilla :class:`SortableState` whose only non-default
-        axis is the name. Under any of the eight modes, the result is
-        the same alpha-ascending or alpha-descending order - which is
-        exactly the right thing before domain wiring: the toolbar still
-        re-orders the grid visibly, proving the wire is alive without
-        requiring domain state to exist.
+        Every axis stays at its default, so all eight modes fall back
+        to alphabetical order. The toolbar still visibly re-orders the
+        grid before the domain wiring lands.
         """
         return SortableState(name=key)
 
@@ -356,12 +244,9 @@ def wire_sort(panel) -> None:
     def _resolve_visible_keys() -> List[str]:
         """Return the post-filter visible key set.
 
-        The filter pipeline is expected to install
-        ``panel.filter_visible_keys`` as a no-argument callable
-        returning the keys the filter currently lets through. Until
-        that lands, we fall back to the grid's full key list: sort
-        applied to "everything" is the correct default for an
-        unfiltered grid.
+        The filter pipeline installs ``panel.filter_visible_keys`` as a
+        no-argument callable. Without it, fall back to the grid's full
+        key list.
         """
         getter = getattr(panel, "filter_visible_keys", None)
         if callable(getter):
@@ -369,41 +254,25 @@ def wire_sort(panel) -> None:
                 visible = getter()
                 return list(visible)
             except Exception:
-                # Filter pipeline is the wrong place to crash a sort;
-                # fall back rather than propagate. The exception path
-                # cannot block the panel.
+                # A broken filter must not crash the sort.
                 pass
         return panel.grid.keys()
 
     def _resort_grid(*_args) -> None:
-        """Compose filter → sort → rebuild, preserve selection.
+        """Compose filter → sort → rebuild, and keep the selection.
 
-        Connected to ``sort_mode_changed`` (which emits the new mode's
-        text label) and exposed as ``panel._resort_grid`` so peer
-        wiring helpers can re-trigger a sort after their own work.
+        Exposed as ``panel._resort_grid`` so peer wiring helpers can
+        re-trigger a sort after their own work.
 
-        When ``panel.filter_pipeline`` exists, the sort is routed
-        through the pipeline so the dataflow stays
-        ``(master -> filter -> sort -> set_keys)``. Without that route, a
-        sort change would call ``rebuild_grid(master_sorted)`` and
-        clobber any active filter. The direct path is preserved for
-        panels constructed without a pipeline.
-
-        A re-entrancy guard (``panel._sort_in_progress``) keeps a
-        re-sort triggered by a :attr:`selection_changed` emit (Selected
-        sort mode) from looping when :meth:`grid.set_keys` emits its own
-        empty selection mid-recompute. The recompute also collapses to a
-        single pass when the lookup closure is already installed on the
-        pipeline: a second recompute would run against a freshly-emptied
-        selection (``set_keys`` clears ``grid._selected``), producing
-        alpha order even when pills are selected. Skipping it preserves
-        the correct selected-first ordering for the Selected sort mode.
+        With ``panel.filter_pipeline`` present the sort goes through
+        the pipeline, so the dataflow stays
+        ``master -> filter -> sort -> set_keys``. The direct path calls
+        ``rebuild_grid(master_sorted)`` and would drop an active
+        filter.
         """
-        # Re-entrancy guard. Selection-driven re-sorts (see
-        # ``_on_selection_changed_for_sort`` below) fire from inside
-        # ``grid.set_keys``'s own ``selection_changed.emit([])``; without
-        # this guard, the inner sort would re-enter the outer sort and
-        # the lookup would consult a cleared selection.
+        # Re-entrancy guard. ``grid.set_keys`` emits an empty
+        # ``selection_changed`` during the sort. The inner sort would
+        # then read a cleared selection.
         if getattr(panel, "_sort_in_progress", False):
             return
         panel._sort_in_progress = True
@@ -414,30 +283,15 @@ def wire_sort(panel) -> None:
             pipeline = getattr(panel, "filter_pipeline", None)
             lookup = _resolve_state_lookup()
             if pipeline is not None:
-                # Capture the selection before the rebuild and restore
-                # it after. ``grid.set_keys`` (called inside the
-                # pipeline's apply path) unconditionally clears
-                # ``_selected`` AND emits ``selection_changed.emit([])``
-                # - that empty signal propagates through the selection
-                # bridge, replaces the selection model with an empty
-                # list, and disables the bulk-action buttons. The
-                # restore below MUST emit so the bridge sees the
-                # recovered selection and re-enables the toolbar
-                # buttons. Without the emitting restore, changing the
-                # sort mode leaves the bulk-action buttons disabled.
+                # ``grid.set_keys`` clears the selection and emits an
+                # empty ``selection_changed``, which disables the bulk
+                # buttons. The restore below must emit, so the bridge
+                # re-enables them.
                 selected = list(panel.grid.selected_keys())
-                # Avoid the redundant ``set_sort_state_lookup`` call
-                # when the pipeline already has this exact closure
-                # installed (the common case - ``wire_sort_state_lookup``
-                # installs it once at panel construction and it never
-                # changes). A redundant call triggers a full pipeline
-                # recompute, which calls ``grid.set_keys`` and clears
-                # the selection - then the ``set_sort_mode`` recompute
-                # right after runs against the cleared selection and
-                # produces alpha order instead of selected-first for
-                # the Selected mode. Skipping the redundant call lets
-                # the single ``set_sort_mode`` recompute see the
-                # captured selection live and order accordingly.
+                # Skip the redundant install. It forces a second
+                # pipeline recompute. That one runs after ``set_keys``
+                # cleared the selection, so the Selected mode falls
+                # back to alpha order.
                 if pipeline._sort_state_lookup is not lookup:
                     pipeline.set_sort_state_lookup(lookup)
                 pipeline.set_sort_mode(mode)
@@ -445,24 +299,18 @@ def wire_sort(panel) -> None:
                     panel.grid.select_keys(selected)
                 return
 
-            # Pipeline-less path (panels constructed without a pipeline).
+            # Pipeline-less path.
             visible_keys = _resolve_visible_keys()
             new_keys = sort_keys(visible_keys, mode, lookup)
 
-            # Selection preservation: capture before the grid is swapped,
-            # restore after. The new grid only honours keys it contains.
-            # See the pipeline branch above for the emit-True rationale -
-            # ``rebuild_grid`` also routes through ``grid.set_keys`` which
-            # emits an empty selection that we must overwrite to keep the
-            # toolbar buttons enabled.
+            # Capture the selection before the swap and restore it
+            # after. The new grid only honours keys it contains.
             selected = list(panel.grid.selected_keys())
 
             panel.rebuild_grid(new_keys)
 
-            # Push group-divider labels onto the freshly-rebuilt grid so
-            # the pipeline-less path matches the pipeline path's visual
-            # output. ``set_group_labels`` is a no-op on grids that
-            # don't implement it.
+            # Match the pipeline path's dividers. ``set_group_labels``
+            # is a no-op on grids that do not implement it.
             set_labels = getattr(panel.grid, "set_group_labels", None)
             if callable(set_labels):
                 labels = [
@@ -478,31 +326,16 @@ def wire_sort(panel) -> None:
         finally:
             panel._sort_in_progress = False
 
-    # Stash the re-sort entry point so the filter/selection helpers can
-    # poke it without re-importing this module.
     panel._resort_grid = _resort_grid
 
-    # The toolbar emits the verbatim label string; the slot ignores
-    # the payload and consults ``current_sort_mode()`` so it remains
-    # the single source of truth.
+    # The toolbar emits the label string. The slot ignores it and
+    # reads ``current_sort_mode()``.
     toolbar.sort_mode_changed.connect(_resort_grid)
 
-    # Selection-change re-sort for ``Selected`` mode.
-    #
-    # The ``Selected`` sort axis groups currently-selected pills above
-    # the rest. Selection state changes via marquee, click, or
-    # ``select_keys`` - none of which fire the sort dropdown's
-    # ``sort_mode_changed``, and none of which trigger a filter
-    # pipeline recompute on their own. Without this connection, the
-    # user would have to re-pick ``Selected`` from the dropdown each
-    # time they changed which pills were selected for the grid to
-    # actually re-order.
-    #
-    # Gated on ``mode is SortMode.SELECTED`` so the four other grouping
-    # modes don't pay a recompute on every click in the grid (their
-    # primary axis doesn't depend on selection). The re-entrancy guard
-    # inside ``_resort_grid`` squelches the inner emit that
-    # ``grid.set_keys`` fires during the sort itself.
+    # Selection changes arrive by marquee, click, or ``select_keys``,
+    # and none of them fire ``sort_mode_changed``. Without this
+    # connection the user must re-pick ``Selected`` after every change
+    # to see the grid re-order.
     def _on_selection_changed_for_sort(*_args) -> None:
         if panel._current_sort_mode is not SortMode.SELECTED:
             return
@@ -511,30 +344,13 @@ def wire_sort(panel) -> None:
     try:
         panel.grid.selection_changed.connect(_on_selection_changed_for_sort)
     except AttributeError:
-        # Grids that don't expose the signal simply don't activate the
-        # selection-re-sort feature.
+        # Grids without the signal do not get the selection re-sort.
         pass
 
 
 # ---------------------------------------------------------------------------
 # Production state-lookup builders
 # ---------------------------------------------------------------------------
-#
-# The wire helper above (``wire_sort``) connects the toolbar to the grid
-# but reads the per-key state through whatever callable the wiring layer
-# has installed on ``panel.sort_state_lookup``. With no such callable
-# installed, every non-alpha sort mode collapses to the alpha secondary
-# because the permissive default lookup leaves every axis at its
-# dataclass default.
-#
-# ``build_sort_state_lookup`` returns a closure that queries the live
-# registry, grid selection, and folder-card order. The wiring layer
-# (``nsl.ui.wiring.sort_state.wire_sort_state_lookup``) installs the
-# closure on the panel and on the filter pipeline so every recompute
-# uses production data.
-#
-# Each axis-specific helper is small and pure (no Qt) so it can be
-# reasoned about independently with stub registries.
 
 
 def _pending_for_key(
@@ -543,20 +359,13 @@ def _pending_for_key(
     current,
     baseline,
 ) -> Optional[str]:
-    """Return the per-key ``Changed state`` bucket: ``"green"`` /
-    ``"red"`` / ``None``.
+    """Return the ``Changed state`` bucket for *key*.
 
-    Matches the formula used by the pill body so the sort and the
-    pill-body wash never disagree:
+    ``"green"`` when the pending state is enabled and the baseline is
+    not. ``"red"`` for the reverse. ``None`` otherwise.
 
-    * ``pending_enabled and not loaded_enabled`` -> ``"green"`` (will-add)
-    * ``loaded_enabled and not pending_enabled`` -> ``"red"`` (will-remove)
-    * otherwise                                  -> ``None``
-
-    Effective-state rule: an entry with ``enabled=False`` collapses to
-    absence - equivalent to "not loaded / not pending." Same convention
-    the banner uses, so the sort and the banner never disagree about the
-    count of changed plugins.
+    An entry with ``enabled=False`` counts as absent. The pill body and
+    the banner use the same rule, so the three never disagree.
     """
     pending_enabled = _key_is_effective(key, current)
     loaded_enabled = _key_is_effective(key, baseline)
@@ -568,10 +377,9 @@ def _pending_for_key(
 
 
 def _key_is_effective(key: str, model) -> bool:
-    """``True`` iff *key* is present in *model* with ``enabled=True``.
+    """``True`` when *key* is in *model* with ``enabled=True``.
 
-    Returns ``False`` when *model* is ``None`` (degraded contexts), the
-    key is absent, or the entry is explicitly ``enabled=False``.
+    A ``None`` model returns ``False``.
     """
     if model is None:
         return False
@@ -589,26 +397,13 @@ def _problem_state_for_key(
 ) -> Tuple[bool, bool]:
     """Return ``(warning, missing)`` matching the pill's status icon.
 
-    Replays the same derivation
-    :func:`nsl.ui.state._derive_status_icon` runs from
-    :meth:`nsl.ui.panel.LoadoutPanel._set_pills_from_registry` so the
-    ``Warnings`` sort and the YELLOW pill body wash always agree about
-    which pills are "needs my attention this session."
+    ``warning`` is always ``False``. The loadout chain is runnable
+    Python, so there is no per-pill load-failed state any more.
+    ``missing`` is ``True`` when neither the scan nor Global carries
+    the plugin.
 
-    Returns ``(warning, missing)`` where ``warning`` is always ``False``
-    under the runnable-python-loadout-chain architecture: there is no
-    per-pill "failed to load" state any more; Nuke's walker either
-    succeeded or crashed the interpreter, so if the panel is open every
-    pill is either Enabled, Disabled, or Missing on disk. ``missing`` is
-    ``True`` when the plugin's source folder doesn't resolve on disk
-    (registry has no discovery record for it and Global doesn't carry it
-    either).
-
-    Best-effort: any failure walking the registry surfaces returns
-    ``(False, False)`` rather than raising. The sort must never crash
-    on a degraded registry - falling back to ``Clean`` keeps the pill
-    in the bottom bucket, which is the correct fallback for an unknown
-    problem state.
+    Any failure walking the registry returns ``(False, False)``. The
+    sort must not crash on a degraded registry.
     """
     if registry is None:
         return (False, False)
@@ -631,27 +426,15 @@ def _folder_for_key(
 ) -> Tuple[int, Optional[str]]:
     """Return ``(priority, label)`` for *key*'s source Plugins Folder.
 
-    Lower priority integer = higher priority, matching the *Plugins
-    Folder Management* list order (top = highest priority). ``label``
-    is the human-readable display name for the ``Folder of origin``
-    divider header - the basename of the folder path so it fits a
-    one-line divider without wrapping.
+    ``label`` is the folder basename, for the ``Folder of origin``
+    divider header. The priority comes from
+    ``panel.folder_card.entries()`` matched against
+    ``registry.discovered_plugins[key].source``.
 
-    Lookup chain:
-
-    1. ``registry.discovered_plugins[key].source`` - absolute folder
-       path the scanner recorded.
-    2. ``panel.folder_card.entries()`` - user-facing folder list in
-       priority order.
-
-    Fallbacks:
-
-    * Plugin without a discovery record / unknown source folder →
-      ``(len(entries), None)`` - sorts to the bottom of ``Folder of
-      origin``; the wiring layer renders the label as ``"Folder · ?"``.
-    * Folder card missing entirely (degraded fixtures) → ``(0, None)``
-      so the legacy "everything ties on priority 0 → A→Z fallback"
-      behaviour is preserved.
+    * Unknown source folder -> ``(len(entries), None)``, which sorts to
+      the bottom.
+    * No folder card at all -> ``(0, None)``, so everything ties and
+      falls back to A -> Z.
     """
     folder_card = getattr(panel, "folder_card", None)
     if folder_card is None or not hasattr(folder_card, "entries"):
@@ -683,31 +466,26 @@ def _folder_priority_for_key(
     panel,
     registry,
 ) -> int:
-    """Back-compat shim. Returns priority only.
+    """Back-compat shim for external callers. Priority only.
 
-    Retained so any external caller that reaches for this helper by name
-    keeps working. New call sites should use :func:`_folder_for_key` so
-    they also pick up the divider label.
+    New call sites should use :func:`_folder_for_key`, which also
+    returns the divider label.
     """
     priority, _label = _folder_for_key(key, panel=panel, registry=registry)
     return priority
 
 
 def _folder_basename(path: str) -> str:
-    """Return *path*'s last non-empty path segment.
+    """Return *path*'s last non-empty segment.
 
-    Trailing-slash tolerant (``"/foo/bar/"`` → ``"bar"``). Falls back
-    to the original string when it has no path separator (e.g. the
-    user configured a bare folder name on a relative search root).
+    Tolerates trailing separators, so ``"/foo/bar/"`` gives ``"bar"``.
     """
     if not path:
         return ""
-    # Trim trailing separators (POSIX or Windows) without depending on
-    # ``os.path`` - keeps this helper independent of the filesystem.
+    # Trim trailing separators without using ``os.path``.
     trimmed = path.rstrip("/\\")
     if not trimmed:
-        return path  # path was all separators - return as-is
-    # Find the last separator of either flavour and slice past it.
+        return path
     last_sep = max(trimmed.rfind("/"), trimmed.rfind("\\"))
     if last_sep < 0:
         return trimmed
@@ -717,17 +495,10 @@ def _folder_basename(path: str) -> str:
 def build_sort_state_lookup(panel) -> StateLookup:
     """Return a ``key → SortableState`` callable closed over *panel*.
 
-    Used by :func:`nsl.ui.wiring.sort_state.wire_sort_state_lookup` to
-    install the production lookup on the panel (and on the filter
-    pipeline). Each call to the returned closure queries the live
-    panel state - domain mutations between sort runs (pill toggles,
-    selection changes, loadout switches, folder reorders) are
-    therefore reflected in the next sort without an explicit refresh.
-
-    Per-key cost is small (a handful of dict lookups + a frozenset
-    membership test on the selection). For typical NSL deployments
-    (< 200 plugins) the total sort cost stays well under one frame
-    even with the per-key resolved-active rebuild.
+    :func:`nsl.ui.wiring.sort_state.wire_sort_state_lookup` installs it
+    on the panel and on the filter pipeline. The closure reads live
+    panel state on every call, so pill toggles, selection changes and
+    folder reorders reach the next sort with no explicit refresh.
     """
 
     def lookup(key: str) -> SortableState:
@@ -742,12 +513,9 @@ def build_sort_state_lookup(panel) -> StateLookup:
         entry = resolved.plugins.get(key) if resolved is not None else None
         enabled = bool(entry.enabled) if entry is not None else True
 
-        # gui_only - same resolved entry, so the sort bucket and the
-        # pill's GUI chip read the identical sparse-diff result. No
-        # extra registry walk. Absent entry (degraded registry, key not
-        # yet reconciled) falls back to False, matching the implicit
-        # ``PluginEntry(enabled=True, gui_only=False)`` default the
-        # state resolver uses.
+        # gui_only - the same resolved entry, so the sort bucket and
+        # the pill's GUI chip read one result. An absent entry falls
+        # back to False.
         gui_only = (
             bool(getattr(entry, "gui_only", False))
             if entry is not None
@@ -755,15 +523,15 @@ def build_sort_state_lookup(panel) -> StateLookup:
         )
 
         # selected - live from the grid. ``selected_keys()`` returns a
-        # list copy each call; wrap once in a set for O(1) membership.
+        # new list each call, so wrap it once.
         try:
             selected_set = set(panel.grid.selected_keys())
         except Exception:  # noqa: BLE001 - grid must not break sort
             selected_set = set()
         selected = key in selected_set
 
-        # pending - compare current effective state vs session-loaded
-        # baseline; same diff math the banner/counters use.
+        # pending - current effective state against the session-loaded
+        # baseline. Same diff math the banner uses.
         baseline = (
             getattr(registry, "session_loaded_baseline", None)
             if registry is not None
@@ -776,10 +544,8 @@ def build_sort_state_lookup(panel) -> StateLookup:
             key, panel=panel, registry=registry
         )
 
-        # folder_priority + folder_label - one folder-card walk yields
-        # both, so the ``Folder of origin`` divider renders the friendly
-        # basename (e.g. ``Folder · plugins_testA``) instead of the
-        # full absolute path.
+        # One folder-card walk gives both the priority and the divider
+        # label.
         folder_priority, folder_label = _folder_for_key(
             key, panel=panel, registry=registry
         )
@@ -802,29 +568,21 @@ def build_sort_state_lookup(panel) -> StateLookup:
 def build_key_to_folder(panel) -> Callable[[str], Optional[str]]:
     """Return a ``key → folder_path`` callable closed over *panel*.
 
-    Companion to :func:`build_sort_state_lookup`. The filter pipeline
-    consumes this for the folder-eye-toggle layer
-    (:meth:`FilterPipeline.on_folder_visibility_changed`). Without a
-    real mapping the eye toggles record state but never hide any
-    pills (see :func:`nsl.ui.filter_pipeline.wire_filter_pipeline`'s
-    default ``key_to_folder=None`` branch).
+    The filter pipeline uses it for the folder eye toggles. Without a
+    real mapping the toggles record state but hide no pills.
 
-    The mapping is queried per-key; uses ``registry.discovered_plugins``
-    as the source of truth. Returns ``None`` for any unknown key
-    (degraded contexts, plugin not in the current scan) - the
-    pipeline treats ``None`` as "doesn't belong to any hidden folder"
-    which keeps the pill visible.
+    The source of truth is ``registry.discovered_plugins``. An unknown
+    key returns ``None``, which the pipeline reads as "not in a hidden
+    folder" and keeps the pill visible.
     """
 
     def key_to_folder(key: str) -> Optional[str]:
         registry = getattr(panel, "registry", None)
         if registry is None:
             return None
-        # Global plugins map to the synthetic Global folder
-        # marker so the filter pipeline's folder-visibility map
-        # can hide them via the Global Plugins row's eye toggle
-        # (parallel to the events.py path; the two handlers must
-        # hold the same invariant).
+        # Global plugins map to a sentinel folder so the Global Plugins
+        # row's eye toggle can hide them. ``events.py`` holds the same
+        # invariant.
         global_base = (
             getattr(registry, "global_plugin_names", None) or frozenset()
         )
@@ -843,44 +601,14 @@ def build_key_to_folder(panel) -> Callable[[str], Optional[str]]:
 # ---------------------------------------------------------------------------
 # Group dividers in the pill grid
 # ---------------------------------------------------------------------------
-#
-# When the active sort mode groups pills (every mode except A->Z / Z->A),
-# the pill grid renders a thin group divider between buckets: a small
-# uppercase group label on the left followed by a 1px hairline
-# stretching to the right edge of the grid.
-#
-# ``group_label_for_state`` returns the per-pill divider label given
-# the pill's :class:`SortableState` and the active :class:`SortMode`.
-# The grid layout walks its key list in sort order and inserts a
-# divider whenever the label changes from the previous pill.
-#
-# A->Z and Z->A return ``None`` for every pill so the grid renders a
-# tight 3-column pack with no dividers.
 
 
 def group_label_for_state(state: SortableState, mode: SortMode) -> Optional[str]:
     """Return the divider label for *state* under *mode*, or ``None``.
 
-    A ``None`` return signals "no divider before this pill" - used for
-    the alphabetical modes and as the fall-through bucket on every
-    pill before the first group transition (the grid does not insert
-    a leading divider above the very first bucket either).
-
-    Vocabulary:
-
-    * ``Status``           -> ``"On"`` (enabled) / ``"Off"`` (disabled).
-    * ``GUI-only``         -> ``"Loads everywhere"`` (top group) /
-      ``"GUI-only"`` (below). The first label mirrors the pill's own
-      off-state tooltip, "GUI-only: off, loads everywhere".
-    * ``Selected``         -> ``"Selected"`` / ``"Unselected"``.
-    * ``Changed state``    -> ``"Pending add"`` / ``"Pending remove"`` /
-      ``"Unchanged"``.
-    * ``Warnings``         -> ``"Missing"`` / ``"Warnings"`` / ``"Clean"``
-      (matches the three-bucket comparator).
-    * ``Folder of origin`` -> ``"Folder · <folder_label>"`` when
-      ``state.folder_label`` is set; otherwise ``"Folder · ?"`` -
-      the wiring layer populates ``folder_label`` via
-      :func:`build_sort_state_lookup`.
+    ``None`` means no divider before this pill, which is every pill in
+    the alphabetical modes. The grid walks its keys in sort order and
+    inserts a divider only where the label changes.
     """
     if mode is SortMode.STATUS:
         return "On" if state.enabled else "Off"
