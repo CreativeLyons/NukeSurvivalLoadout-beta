@@ -1714,28 +1714,19 @@ def _on_pill_gui_only(panel, plugin_name: str, gui_only: bool) -> None:
 
 
 def _switch_to_custom_in_memory(registry) -> None:
-    """Flip the active view to the in-memory Custom wildcard slot.
+    """Flip the active view to the in-memory Custom slot.
 
-    Custom is NSL's in-memory wildcard slot - it has no on-disk
-    folder and is NEVER a bootable loadout. So the IN-MEMORY active
-    becomes "Custom" (the panel runs as Custom), but the ON-DISK
-    ``ACTIVE_LOADOUT`` is cleared to "". Writing "Custom" to disk would
-    send the next Nuke restart's boot dispatcher chasing a
-    non-existent ``loadouts/Custom/`` folder: it would silently load
-    nothing AND orphan the user's last real loadout pointer. Clearing
-    to "" is the honest serialization of the invariant "Custom never
-    persists as the active loadout"; the user is warned at panel-close
-    that leaving Custom means nothing loads next launch (see
-    ``confirm_close_with_unsaved_changes``). Panic + folders already on
-    disk are preserved.
+    The panel runs as Custom, but ``ACTIVE_LOADOUT`` on disk is cleared
+    to "". Custom has no folder, so writing "Custom" to disk would send
+    the next boot dispatcher looking for ``loadouts/Custom/``. It would
+    load nothing and lose the pointer to the last real Loadout.
 
-    The fresh Custom model seeds from the resolved Global model - the
-    departure point IS the Global view. When a dirty Custom model is
-    parked from earlier in the session, ``apply_op_result``'s
-    pure-switch restore brings that back instead of the seed.
+    The fresh Custom model seeds from the resolved Global model. If a
+    dirty Custom model is held from earlier in the session,
+    ``apply_op_result`` restores that instead of the seed.
 
-    Shared by the dropdown's explicit Custom selection and the
-    auto-create on the first pill toggle while Global is active.
+    Shared by the dropdown's Custom selection and by the auto-create on
+    the first pill toggle while Global is active.
     """
     from dataclasses import replace
     from nsl.boot.dispatcher import (
