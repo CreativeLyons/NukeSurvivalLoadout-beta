@@ -1,32 +1,17 @@
-"""Side panel - the universal "more info" surface for the Loadout Panel.
+"""Side panel - the "more info" surface for the Loadout Panel.
 
 Locked behaviours:
 
-* Three tabs, left to right: **Summary**, **Menu**, **Info** (mirroring the
-  pill-button order GUI / menu / info on each card). (The old **Log**
-  tab was retired: the loadout chain no longer captures per-plugin
-  diagnostics, so it had no live data source. ``show_log`` / ``log_view``
-  remain defined but dormant: never wired or shown.)
-* **Summary is the DEFAULT active tab on first open.** It is NEVER auto-activated by a
-  pill-button click - the user switches to it manually.
-* Clicking a pill's **info button** loads README into the Info tab AND
-  activates that tab. Clicking a pill's **menu button** loads that Plugin's
-  ``menu.py`` into the Menu tab AND activates that tab.
-* Empty-state placeholders:
+* Three tabs, left to right: Summary, Menu, Info. The order mirrors the
+  pill button order on each card.
+* Summary is the default tab on first open. A pill click never activates
+  it.
+* A pill's info button loads the README into the Info tab and activates
+  it. A pill's menu button does the same for ``menu.py`` and the Menu tab.
+* The Log tab is retired. ``log_view`` is never added as a tab.
 
-    - Info: *"Click the info button on a Plugin to view its README."*
-    - Menu: *"Click the menu button on a Plugin to view its menu.py."*
-
-* The Info tab carries a gutter header naming the targeted Plugin
-  (``README: <Plugin>``) plus the Preview/Markdown toggle. The Menu tab
-  carries a gutter header (``menu.py - <Plugin>``) above the code view. The
-  Summary tab carries no header.
-* Info renders Markdown via ``QTextBrowser.setMarkdown()`` (Nuke 16 ships PySide6
-  6.5.3, Qt 6.5 - ``setMarkdown`` is present). Menu renders raw ``menu.py``
-  source as plain text with a Monokai Python ``QSyntaxHighlighter`` attached.
-
-All Qt access goes through :mod:`nsl.compat` - never import PySide2 / PySide6 directly.
-No ``import nuke``. This module never edits ``nsl/ui/__init__.py``.
+All Qt access goes through :mod:`nsl.compat`. Never import PySide2 or
+PySide6 directly. No ``import nuke``.
 """
 
 from __future__ import annotations
@@ -35,46 +20,21 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
-# Tab index constants - also part of the public API for callers wanting to assert /
-# drive the active tab without depending on the QTabWidget's internal ordering.
 TAB_SUMMARY = 0
-# Tab order mirrors the pill-button order on each card (GUI / menu / info):
-# menu.py sits in the middle, Info on the right end.
 TAB_MENU = 1
 TAB_INFO = 2
-# Dormant alias: the old "Log" tab was retired (the chain no longer captures
-# per-plugin diagnostics, so the tab had no live data source).
-# ``show_log`` / ``log_view`` remain defined but are never wired or shown.
-# Kept equal to ``TAB_MENU`` so any stale caller lands on a valid tab rather
-# than out of range.
+# The Log tab is retired. ``TAB_LOG`` stays equal to ``TAB_MENU`` so a stale
+# caller lands on a valid tab instead of out of range.
 TAB_LOG = TAB_MENU
 
-# Placeholder strings.
 PLACEHOLDER_INFO = "Click the info button on a Plugin to view its README."
 PLACEHOLDER_MENU = "Click the menu button on a Plugin to view its menu.py."
-# Dormant - retired with the Log tab (see ``TAB_LOG`` above).
+# Dormant. Retired with the Log tab.
 PLACEHOLDER_LOG = "Click the diagnostic button on a Plugin to view its log."
 
-# Default Summary content shown before any session-level aggregate is supplied.
 DEFAULT_SUMMARY_TEXT = (
     "Session load status will appear here once the panel is populated."
 )
-
-
-# Markdown preview block-spacing.
-# Qt's QTextDocument applies near-zero default margins to headings,
-# paragraphs and list items rendered from ``setMarkdown()``; blank lines
-# in the source vanish and the rendered output reads as one continuous
-# wall of text. ``document().setDefaultStyleSheet(css)`` cannot fix this:
-# Qt's defaultStyleSheet only applies to HTML content set via ``setHtml()``,
-# and ``setMarkdown`` is built by an internal parser that writes
-# QTextBlockFormat values directly, bypassing the stylesheet entirely.
-#
-# The fix lives in ``SidePanel._apply_markdown_block_spacing``:
-# walk every block in the document post-parse and rewrite each block's
-# ``topMargin`` / ``bottomMargin`` based on ``headingLevel()`` and list
-# membership. Adjust the values in that method if a future README needs
-# tighter/airier rhythm.
 
 
 # ---------------------------------------------------------------------------
@@ -84,88 +44,60 @@ DEFAULT_SUMMARY_TEXT = (
 
 @dataclass(frozen=True)
 class PluginDetail:
-    """The data a caller hands to :meth:`SidePanel.show_info` / ``show_log``.
+    """The data a caller hands to :meth:`SidePanel.show_info` or ``show_menu``.
 
-    Callers are responsible for composing the right provenance-line variant;
-    this widget just renders whatever string it is given.
+    ``provenance`` is composed by the caller. Only the dormant Log tab
+    still renders it.
     """
 
     plugin_name: str
     provenance: str
-    body: str  # README markdown source for Info; traceback / diagnostic text for Log.
-    source_path: Optional[str] = None  # absolute path to the on-disk file the
-                                       # body came from (the Menu tab's
-                                       # ``menu.py``), so the Menu tab's "Open"
-                                       # button can open it in the OS default
-                                       # editor. ``None`` for Info/Log and when
-                                       # no file exists.
+    # README markdown for Info, ``menu.py`` source for Menu.
+    body: str
+    # Absolute path of the file ``body`` came from. The Menu tab's Open
+    # button needs it. None for Info and Log, and when no file exists.
+    source_path: Optional[str] = None
 
 
 def info_tab_header(plugin_name: str) -> str:
-    """Header line for the Info tab - verbatim ``README: <PluginName>`` form."""
+    """Header line for the Info tab: ``README: <PluginName>``."""
     return f"README: {plugin_name}"
 
 
 def log_tab_header(plugin_name: str) -> str:
-    """Header line for the (dormant) Log tab - analogous to the Info form."""
+    """Header line for the dormant Log tab."""
     return f"Log: {plugin_name}"
 
 
 def menu_tab_header(plugin_name: str) -> str:
-    """Header line for the Menu tab - names the Plugin whose ``menu.py``
-    is shown. Mirrors the Info gutter caption form."""
+    """Header line for the Menu tab: ``menu.py - <PluginName>``."""
     return f"menu.py - {plugin_name}"
 
 
 # ---------------------------------------------------------------------------
-# Widget - Qt construction is deferred to call time so the module itself can be
-# imported without PySide present (mirrors the pattern used by other NSL UI
-# modules that need to stay headless-importable on the build host).
+# Widget
 # ---------------------------------------------------------------------------
 
 
 class SidePanel:
-    """Three-tab side panel (Summary / Info / Log).
+    """Three-tab side panel: Summary, Menu, Info.
 
-    Construction defers all Qt work until ``__init__`` runs so the *module* can
-    be imported on machines without PySide. Once instantiated, the panel owns
-    a :class:`QTabWidget` with three sub-pages - each a :class:`QTextBrowser`
-    so README markdown, monospace tracebacks, and the session summary can all
-    flow through the same rendering surface.
-
-    Parameters
-    ----------
-    parent:
-        Optional Qt parent. None when used standalone outside the panel.
-
-    Notes
-    -----
-    The widget exposes :attr:`tabs` (the :class:`QTabWidget`) and three content
-    browsers (``summary_view``, ``info_view``, ``log_view``) so callers can do
-    direct content-tree introspection.
+    Qt work happens in ``__init__``, so the module imports without PySide.
+    Callers read :attr:`tabs`, ``summary_view``, ``info_view`` and
+    ``menu_view`` directly. ``log_view`` exists but is dormant.
     """
 
     def __init__(self, parent=None):  # type: ignore[no-untyped-def]
-        # Imported lazily so the module loads without PySide.
         from nsl import compat
 
         QtWidgets = compat.QtWidgets
         QtGui = compat.QtGui
         QtCore = compat.QtCore
 
-        # Top-level container - the side panel as a whole. Holds a QTabWidget
-        # spanning its full area. Callers read the tabs widget directly via
-        # ``self.tabs``.
         self.widget = QtWidgets.QWidget(parent)
-        # Fill the side panel's outer widget with the recessed gutter
-        # colour (`#222222`) so it shows through the QTabWidget's
-        # transparent tab-row area - the space to the right of the last
-        # tab where QTabBar does not extend. The pane below the tabs is
-        # opaque #262626 so this fill only affects the tab-row strip.
-        # setPalette + autoFillBackground (NOT setStyleSheet) so we
-        # don't pollute child rendering through the QSS cascade - see
-        # HybridTextButton's history for the prior incident this guards
-        # against.
+        # The tab-row area to the right of the last tab is transparent, so
+        # this fill shows through there. Use setPalette, not setStyleSheet,
+        # so the QSS cascade does not reach the children.
         self.widget.setAutoFillBackground(True)
         side_palette = self.widget.palette()
         side_palette.setColor(QtGui.QPalette.Window, QtGui.QColor("#222222"))
@@ -174,37 +106,16 @@ class SidePanel:
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.tabs = QtWidgets.QTabWidget(self.widget)
-        # Nuke-style tab chrome: flat rectangular tabs sized to content,
-        # active tab carries the signature yellow-orange underline + text
-        # tint, inactive tabs are muted on a slightly-darker bar than the
-        # panel body. Hairline separators (1 px shadow) between adjacent
-        # tabs match Nuke's panel divider style. Stylesheet is scoped to
-        # the NSL_SidePanelTabs objectName so it does NOT leak.
         self.tabs.setObjectName("NSL_SidePanelTabs")
         if hasattr(self.tabs, "tabBar"):
             self.tabs.tabBar().setExpanding(False)
-            # Pointing-hand cursor across the Summary / Info / Log tab
-            # bar so clicking between tabs reads as the same interactive
-            # vocabulary as the rest of the panel's affordances. Set on
-            # the QTabBar (not the QTabWidget) because hover lives on
-            # the bar; the QTabWidget's body is the pane content.
+            # Set on the QTabBar, not the QTabWidget. Hover lives on the
+            # bar and the QTabWidget's body is the pane content.
             self.tabs.tabBar().setCursor(QtCore.Qt.PointingHandCursor)
-        # Per NSL_Design_System_New (comp-tabs canonical recipe): tabs read
-        # as raised discrete cells over a darker gutter, with the active
-        # cell brighter still and carrying a 2px accent underline.
-        #
-        # Tokens (from colors_and_type.css / preview/comp-tabs.html):
-        #   gutter             #2a2a2a  + 1px #1f1f1f bottom hairline
-        #   tab inactive fill  #2f2f2f  + 1px #4a4a4a outline (T/L/R)
-        #   tab active fill    #424242  + 1px #5e5e5e outline (T/L/R)
-        #   pane (body bg)     #262626  (surface-base - recessed body)
-        #   active accent      #ee9626  (2px underline + white text)
-        #
-        # Qt limitations vs canonical:
-        #   * box-shadow inset (active highlight) - unsupported; brighter
-        #     top border #5e5e5e carries the raised-cell read instead.
-        #   * ::after overlay underline at bottom:-1px - unsupported;
-        #     border-bottom on :selected is the in-engine equivalent.
+        # From the NSL_Design_System_New comp-tabs recipe. Two of its
+        # effects have no Qt equivalent:
+        #   * inset box-shadow  - the brighter #5e5e5e top border stands in.
+        #   * ::after underline - border-bottom on :selected stands in.
         self.tabs.setStyleSheet(
             """
             /* QTabWidget itself paints the tab-row area to the RIGHT of
@@ -272,24 +183,11 @@ class SidePanel:
         )
         layout.addWidget(self.tabs)
 
-        # --- Cmd+C / Cmd+A inside the three QTextBrowser views -------------
-        # Nuke installs Cmd+C and Cmd+A as ApplicationShortcuts targeting the
-        # DAG's node-copy / "Select All Nodes" actions. A plain
-        # ``QShortcut(QKeySequence.Copy, view)`` with ``WidgetShortcut`` context
-        # does not win inside Nuke (the ApplicationShortcut still fires, since
-        # Nuke's DAG widget keeps keyboard focus and the docked panel's focus
-        # chain doesn't transfer cleanly to the ``QTextBrowser`` on click). The
-        # robust fix is an event filter: catch ``QEvent.ShortcutOverride`` for
-        # the affected sequences and ``accept()`` them. Accepting
-        # ShortcutOverride tells Qt "don't route this as a shortcut: deliver the
-        # keyPress to the focused widget instead." ``QTextBrowser``'s built-in
-        # keyPressEvent handles both Copy and SelectAll natively (it's a
-        # read-only QTextEdit), so the selection / clipboard work happens
-        # without us calling any QTextEdit method ourselves.
-        #
-        # Right-click → Copy / Select All is unaffected (context-menu path
-        # was never intercepted). This filter is purely for the keyboard
-        # path. The filter is parented to the view so its lifetime matches.
+        # --- Cmd+C / Cmd+A inside the QTextBrowser views -------------------
+
+        # Nuke installs both as ApplicationShortcuts for the DAG, and a
+        # QShortcut with WidgetShortcut context does not beat them. Accepting
+        # QEvent.ShortcutOverride sends the key press to the focused widget.
         class _TextShortcutOverride(QtCore.QObject):
             def eventFilter(self, _obj, event):
                 if event.type() == QtCore.QEvent.ShortcutOverride:
@@ -302,25 +200,18 @@ class SidePanel:
                 return False
 
         def _install_text_shortcuts(view):
-            # Keep a reference on the view itself so Python doesn't
-            # garbage-collect the filter object out from under Qt.
+            # Hold a reference so Python does not garbage-collect the filter
+            # while Qt still uses it.
             view._nsl_text_shortcuts = _TextShortcutOverride(view)
             view.installEventFilter(view._nsl_text_shortcuts)
 
         # --- Summary ---------------------------------------------------------
-        # The session-wide Load Status surface. The full grouped layout (counts
-        # line + Failed / Missing / Pending lists with click-through) is a later
-        # phase; this widget simply renders whatever text/HTML is fed to it via
-        # ``set_summary``.
+
         self.summary_view = QtWidgets.QTextBrowser(self.widget)
         self.summary_view.setOpenExternalLinks(True)
-        # Summary line spacing. The Summary is rendered via setHtml, which
-        # (unlike setMarkdown - see the block-spacing note above) DOES honour
-        # the document's default stylesheet. Qt's default is line-height 100%
-        # with tight list margins, which reads cramped; bump the leading to
-        # give the plugin list a bit more breathing room.
-        # Guarded because some document() implementations may not accept
-        # setDefaultStyleSheet.
+        # Summary is set with setHtml, which honours the document stylesheet.
+        # setMarkdown does not, so the Info tab needs
+        # ``_apply_markdown_block_spacing`` instead.
         try:
             self.summary_view.document().setDefaultStyleSheet(
                 "p { line-height: 110%; }"
@@ -333,8 +224,7 @@ class SidePanel:
         self.tabs.addTab(self.summary_view, "Summary")
 
         # --- Info ------------------------------------------------------------
-        # Markdown surface for the Plugin's README.md, rendered via
-        # QTextBrowser.setMarkdown.
+
         self.info_view = QtWidgets.QTextBrowser(self.widget)
         self.info_view.setOpenExternalLinks(True)
         self._set_text(self.info_view, PLACEHOLDER_INFO)
@@ -342,13 +232,10 @@ class SidePanel:
         self.tabs.addTab(self.info_view, "Info")
 
         # --- Log (DORMANT) ---------------------------------------------------
-        # The Log tab was retired: the runnable-python-loadout chain no longer
-        # captures per-plugin diagnostics, so the tab had no live data source
-        # (the diag chip that drove it never lit in production).
-        # ``log_view`` / ``show_log`` / ``clear_log`` are kept
-        # defined so any stale caller (e.g. a reload re-emit) degrades to a
-        # no-op rather than an AttributeError - but the view is NOT added as a
-        # tab and nothing wires it. Replaced in the tab bar by the Menu tab.
+
+        # The chain captures no per-plugin diagnostics, so the Menu tab took
+        # this one's place. ``log_view`` and its methods stay defined so a
+        # stale caller degrades to a no-op, not an AttributeError.
         self.log_view = QtWidgets.QTextBrowser(self.widget)
         self.log_view.setOpenExternalLinks(True)
         _install_text_shortcuts(self.log_view)
@@ -358,29 +245,20 @@ class SidePanel:
         ) else mono.setStyleHint(QtGui.QFont.TypeWriter)
         self.log_view.setFont(mono)
         self._set_text(self.log_view, PLACEHOLDER_LOG)
-        # CRITICAL: this view is parented to the side-panel container but NEVER
-        # added to a tab/layout. Without an explicit hide() it renders as an
-        # orphan child at (0,0), floating over the tab bar and covering the
-        # Summary tab. Hide it so it stays a dormant, non-painting widget that
-        # show_log() can still target if some stale caller ever fires.
+        # This view is parented but never added to a tab. Without hide() it
+        # paints as an orphan child at (0,0), over the tab bar and covering
+        # the Summary tab.
         self.log_view.hide()
 
         # --- Menu ------------------------------------------------------------
-        # Shows a Plugin's ``menu.py`` so artists can spot hotkey / menu
-        # assignments and manage them from one place. Monokai (Sublime-style)
-        # Python syntax highlighting via ``python_highlight``. v1 is
-        # display-only; editing / saving is a later phase. A thin gutter
-        # header names the Plugin (the header can't live inside the
-        # highlighted document, which holds raw ``menu.py`` source).
+
         self.menu_container = QtWidgets.QWidget(self.widget)
         _menu_layout = QtWidgets.QVBoxLayout(self.menu_container)
         _menu_layout.setContentsMargins(0, 0, 0, 0)
         _menu_layout.setSpacing(0)
 
-        # Header strip - plugin caption on the LEFT, an "Open" action button on
-        # the RIGHT. Mirrors the Info tab's gutter (header label + Preview/
-        # Markdown toggle). The Open button launches the on-disk menu.py in the
-        # OS default text editor.
+        # The header names the Plugin, because it cannot live inside the
+        # highlighted document that holds the raw ``menu.py`` source.
         self.menu_header = QtWidgets.QWidget(self.menu_container)
         self.menu_header.setObjectName("NSL_MenuHeaderBar")
         _hdr_layout = QtWidgets.QHBoxLayout(self.menu_header)
@@ -404,8 +282,6 @@ class SidePanel:
         self.menu_open_btn.clicked.connect(self._on_menu_open_clicked)
         _hdr_layout.addWidget(self.menu_open_btn)
 
-        # Styled to match the Info tab's small toggle buttons (same palette /
-        # sizing), minus the checkable state since Open is a one-shot action.
         self.menu_header.setStyleSheet(
             """
             QWidget#NSL_MenuHeaderBar {
@@ -441,11 +317,9 @@ class SidePanel:
         )
         self.menu_header.hide()  # only shown once a menu is loaded
 
-        # Read-only, line-numbered Python code view (QPlainTextEdit-based, with
-        # a left line-number gutter). Built lazily; falls back to a plain
-        # QTextBrowser if the Qt binding can't build it (e.g. a headless
-        # environment) so panel construction never fails - the fallback simply
-        # has no gutter and no highlighting.
+        # Read-only Python code view with a line-number gutter. It falls back
+        # to a plain QTextBrowser when the binding cannot build it, so
+        # construction never fails. The fallback has no gutter and no colour.
         self.menu_view = None
         try:
             from nsl.ui.python_highlight import make_code_view
@@ -463,14 +337,9 @@ class SidePanel:
             QtGui.QFont, "StyleHint"
         ) else menu_mono.setStyleHint(QtGui.QFont.TypeWriter)
         self.menu_view.setFont(menu_mono)
-        # Code canvas. We keep the Monokai *token* colours (set by the
-        # highlighter) but deliberately do NOT use Monokai's olive-tinted
-        # background (#272822): it clashed with the panel's neutral greys.
-        # The canvas is a dark, unsaturated grey matching the
-        # panel chrome (#222222, same as the Menu gutter header) so the code
-        # area reads as part of the panel. ``#NSL_MenuView`` (objectName-only
-        # selector) so it applies whether the view is a QPlainTextEdit or the
-        # QTextBrowser fallback, without cascading into sibling views.
+        # Keep the Monokai token colours, but not its olive background
+        # (#272822), which clashed with the panel greys. The objectName-only
+        # selector covers both the QPlainTextEdit and the fallback.
         self.menu_view.setStyleSheet(
             """
             #NSL_MenuView {
@@ -482,11 +351,9 @@ class SidePanel:
             }
             """
         )
-        # Attach the Monokai Python highlighter to the view's document. Stored
-        # on ``self`` so Python doesn't GC the highlighter out from under Qt.
-        # Guarded: a binding without QSyntaxHighlighter (e.g. a headless
-        # environment) must still construct the panel - it just shows the
-        # menu.py source uncoloured.
+        # Stored on ``self`` so Python does not GC the highlighter while Qt
+        # uses it. Guarded: a binding without QSyntaxHighlighter still builds
+        # the panel and shows the source uncoloured.
         self._menu_highlighter = None
         try:
             from nsl.ui.python_highlight import (
@@ -501,46 +368,33 @@ class SidePanel:
 
         _menu_layout.addWidget(self.menu_header)
         _menu_layout.addWidget(self.menu_view)
-        # Insert at TAB_MENU (index 1) rather than append: the Menu page is
-        # built after the Info page, but the tab order is Summary / menu.py /
-        # Info, so this pushes Info from index 1 to index 2 (= TAB_INFO).
+        # Insert, not append. The Menu page is built after Info, and this
+        # pushes Info from index 1 to TAB_INFO.
         self.tabs.insertTab(TAB_MENU, self.menu_container, "menu.py")
 
-        # Track currently-targeted plugin per content-bearing tab. Summary is
-        # session-wide and has no targeted Plugin. Set BEFORE wiring signals so
-        # the currentChanged handler can safely read these attributes.
+        # Set before the signals are wired, so the currentChanged handler can
+        # read them safely.
         self._info_plugin: Optional[PluginDetail] = None
         self._log_plugin: Optional[PluginDetail] = None  # dormant (Log retired)
         self._menu_plugin: Optional[PluginDetail] = None
         self._menu_source_path: Optional[str] = None  # on-disk menu.py for Open
-        self._refresh_callback = None  # set by the panel; re-reads files
+        self._refresh_callback = None  # set by the panel, re-reads files
         self._info_mode: str = "preview"  # "preview" | "source"
 
         # --- Info-mode toggle (Preview / Markdown) ---------------------------
-        # Tiny segmented two-button pill floating over the Info tab's text
-        # area, pinned to the top-right corner. Visible only when the Info
-        # tab is active AND has a loaded plugin. Flips the README between
-        # rendered Markdown (Preview) and raw source (Markdown).
-        #
+
         # Parented to ``info_view`` so it positions in viewport-local coords
-        # and stays clear of the QTabWidget's tab bar entirely. The viewport
-        # margin on ``info_view`` reserves top whitespace so README content
-        # never scrolls underneath the floating toggle.
+        # and stays clear of the tab bar. The viewport margin set below stops
+        # README content scrolling under it.
         self._info_toggle_widget = QtWidgets.QWidget(self.info_view)
         self._info_toggle_widget.setObjectName("NSL_InfoModeToggle")
         _toggle_layout = QtWidgets.QHBoxLayout(self._info_toggle_widget)
         _toggle_layout.setContentsMargins(0, 0, 0, 0)
         _toggle_layout.setSpacing(0)
 
-        # Plugin-name header lives in the same gutter as the
-        # Preview/Markdown toggle (``README: <Plugin>`` sits beside the
-        # preview / markdown area, which would otherwise be blank).
-        # Left-aligned label + stretch + right-aligned toggle buttons.
-        # Replaces the old in-document `### README: <Plugin>` header +
-        # italic provenance front matter so the README body now starts at
-        # the very top of the rendered text. Also guards the rare case
-        # where a README has no name line at the top: the gutter still
-        # carries the Plugin identity.
+        # The ``README: <Plugin>`` caption lives here, not in the document.
+        # The README body then starts at the top of the rendered text. It
+        # also names the Plugin when the README has no title line.
         self._info_header_label = QtWidgets.QLabel("", self._info_toggle_widget)
         self._info_header_label.setObjectName("NSL_InfoHeaderLabel")
         self._info_header_label.setTextInteractionFlags(
@@ -568,18 +422,13 @@ class SidePanel:
         _toggle_group.setExclusive(True)
         _toggle_group.addButton(self._info_preview_btn)
         _toggle_group.addButton(self._info_source_btn)
-        # Keep a handle so it isn't GC'd; the QButtonGroup is parented but
-        # PySide can be opportunistic about ownership here.
+        # Keep a handle. The QButtonGroup is parented, but PySide ownership
+        # is not reliable here.
         self._info_toggle_group = _toggle_group
 
         _toggle_layout.addWidget(self._info_preview_btn)
         _toggle_layout.addWidget(self._info_source_btn)
 
-        # Tiny floating pill: small font, tight padding. Uses the same
-        # active-tab palette so the active button reads as the same surface
-        # as the active Side panel tab. Header label on the left of the
-        # same strip - muted bold so it reads as a gutter caption,
-        # not as part of the README body.
         self._info_toggle_widget.setStyleSheet(
             """
             QWidget#NSL_InfoModeToggle { background: transparent; }
@@ -630,15 +479,12 @@ class SidePanel:
             lambda: self._set_info_mode("source")
         )
 
-        # Reserve top whitespace in the Info text viewport so the floating
-        # toggle never overlaps README content (the toggle sits inside this
-        # reserved margin band).
         self.info_view.setViewportMargins(0, 28, 0, 0)
-        # Start hidden; show_info / _on_tab_changed reveal it on demand.
+        # Start hidden. show_info and _on_tab_changed reveal it.
         self._info_toggle_widget.hide()
 
-        # Reposition toggle on info_view resize via a tiny event filter
-        # (QWidget has no resize signal - only the resizeEvent virtual).
+        # QWidget has no resize signal, only the resizeEvent virtual, so the
+        # toggle is repositioned from an event filter.
         class _ResizeForwarder(QtCore.QObject):
             def __init__(self_filter, sidepanel, parent=None):
                 super().__init__(parent)
@@ -652,16 +498,11 @@ class SidePanel:
         self._info_resize_filter = _ResizeForwarder(self, self.widget)
         self.info_view.installEventFilter(self._info_resize_filter)
 
-        # Visibility tracks the active tab + whether Info has a plugin loaded.
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
-        # ⟳ Refresh - mounted in the tab bar's top-right corner so it's
-        # visible across all tabs. Reuses the loadout strip's crisp painted
-        # "revert" circular-arrow glyph button (a Unicode glyph rendered
-        # unclear at this size). Clicking re-reads the README + menu.py for
-        # the currently-shown plugins. Guarded: a headless environment can't
-        # build the glyph button, so on any failure the corner button is
-        # simply omitted and the panel still constructs.
+        # Refresh sits in the tab bar corner, so it shows on every tab. It
+        # reuses the loadout strip's painted "revert" glyph, because the
+        # Unicode glyph renders unclear at this size.
         self.refresh_btn = None
         try:
             from nsl.ui.loadout_strip import _GlyphIconButton
@@ -698,12 +539,9 @@ class SidePanel:
         except Exception:
             self.refresh_btn = None
 
-        # Summary is the DEFAULT active tab on first open.
-        # Tab indices match TAB_SUMMARY / TAB_INFO / TAB_LOG.
         self.tabs.setCurrentIndex(TAB_SUMMARY)
 
-        # Keep a Qt handle for sizing so standalone (parentless) use gets a
-        # stable widget size regardless of layout hints.
+        # Give standalone, parentless use a stable size.
         self.widget.resize(420, 520)
 
     # ------------------------------------------------------------------
@@ -713,15 +551,9 @@ class SidePanel:
     def show_info(self, detail: PluginDetail, *, activate: bool = True) -> None:
         """Populate the Info tab with ``detail``.
 
-        Clicking a pill's info button loads the README and activates the Info
-        tab. The Preview/Markdown toggle is reset to
-        Preview on every new Info load - opening a different README always
-        starts in rendered mode.
-
-        ``activate=False`` is the refresh path: re-render the README in place
-        WITHOUT switching to the Info tab and WITHOUT resetting the
-        Preview/Markdown mode (so a refresh preserves whatever the user was
-        viewing).
+        ``activate=True`` switches to the Info tab and resets the toggle to
+        Preview, so every new README opens rendered. ``activate=False`` is
+        the refresh path. It re-renders in place and keeps the current mode.
         """
         self._info_plugin = detail
         if activate:
@@ -731,24 +563,19 @@ class SidePanel:
         self._render_info()
         if activate:
             self.tabs.setCurrentIndex(TAB_INFO)
-            # Force toggle visibility in case the tab was already on Info (so
-            # currentChanged doesn't fire to re-evaluate).
+            # currentChanged does not fire when Info is already active.
             self._on_tab_changed(self.tabs.currentIndex())
 
     def show_log(self, detail: PluginDetail) -> None:
-        """Populate the Log tab with ``detail`` AND auto-switch to it.
+        """Populate the dormant Log tab with ``detail``.
 
-        Tracebacks render as monospace text inside an HTML wrapper so the
-        Plugin-name header + provenance line stay legible above the captured
-        Python traceback.
+        ``log_view`` is hidden, so nothing appears. ``TAB_LOG`` equals
+        ``TAB_MENU``, so the switch at the end lands on the Menu tab.
         """
         self._log_plugin = detail
-        # ``white-space: pre-wrap`` + ``word-wrap: break-word`` mirrors the
-        # Info source-view pre style above - preserves significant whitespace
-        # inside tracebacks while wrapping long file paths / no-space tokens
-        # at the viewport edge. Bare ``<pre>`` defaults to ``white-space: pre``
-        # (no wrap) which overflows the viewport and hides the right edge of
-        # every long line.
+        # ``pre-wrap`` keeps the whitespace inside a traceback and still
+        # wraps long paths. A bare ``<pre>`` does not wrap, so it hides the
+        # right edge of every long line.
         body_html = (
             f"<h3>{_html_escape(log_tab_header(detail.plugin_name))}</h3>"
             f"<p style='color:#888;font-size:smaller;margin-top:-6px;'>"
@@ -763,24 +590,17 @@ class SidePanel:
     def show_menu(self, detail: PluginDetail, *, activate: bool = True) -> None:
         """Populate the Menu tab with a Plugin's ``menu.py``.
 
-        ``detail.body`` is the raw ``menu.py`` source (or the
-        "No menu.py found…" message). It is rendered as plain text so the
-        attached Monokai Python highlighter can colour it; the gutter header
-        names the Plugin. Like the info button, clicking the menu button loads
-        the file and activates the Menu tab.
-
-        ``activate=False`` is the refresh path: re-render in place WITHOUT
-        switching to the Menu tab.
+        ``detail.body`` is raw source, or the "no menu.py" message. It is set
+        as plain text so the Monokai highlighter can colour it.
+        ``activate=False`` is the refresh path and does not switch tab.
         """
         self._menu_plugin = detail
         self._menu_source_path = detail.source_path
         self.menu_header_label.setText(menu_tab_header(detail.plugin_name))
-        # Open is only actionable when there's a real file on disk to open
-        # (disabled for the "no menu.py" / "plugin not found" cases).
         self.menu_open_btn.setEnabled(bool(detail.source_path))
         self.menu_header.show()
-        # Plain text so the QSyntaxHighlighter owns all char formatting; any
-        # prior HTML/markdown state on the document is discarded.
+        # Plain text, so the highlighter owns all character formatting and
+        # any prior HTML state on the document is discarded.
         self.menu_view.setPlainText(detail.body)
         if activate:
             self.tabs.setCurrentIndex(TAB_MENU)
@@ -795,22 +615,14 @@ class SidePanel:
         self._set_text(self.menu_view, PLACEHOLDER_MENU)
 
     def _on_menu_open_clicked(self) -> None:
-        """Open the currently-shown ``menu.py`` in the OS default text editor.
-
-        No-op when there is no on-disk file (the button is disabled in that
-        case anyway). Never raises - a failed launch must not surface as an
-        unhandled exception out of the click handler.
-        """
+        """Open the current ``menu.py`` in the OS default text editor."""
         _open_path_in_editor(self._menu_source_path)
 
     def set_refresh_callback(self, callback) -> None:
-        """Install the callable the ⟳ refresh button invokes.
+        """Install the callable the refresh button invokes.
 
-        The panel wires this to the registry's ``on_side_panel_refresh``,
-        which re-reads the README + menu.py for the currently-shown plugins
-        and pushes fresh content back via ``show_info`` / ``show_menu``
-        (``activate=False``). Left ``None`` in standalone use, where
-        the button is a harmless no-op.
+        The panel wires this to ``on_side_panel_refresh``, which re-reads the
+        README and menu.py and calls back with ``activate=False``.
         """
         self._refresh_callback = callback
 
@@ -825,11 +637,10 @@ class SidePanel:
             pass
 
     def set_summary(self, text_or_html: str, *, html: bool = False) -> None:
-        """Update the Summary tab content. Does NOT change the active tab.
+        """Update the Summary tab content. Does not change the active tab.
 
-        Summary is never auto-activated. The caller can
-        repaint the aggregate status as often as it likes without yanking the
-        user away from whatever Plugin they were inspecting.
+        Summary is never auto-activated, so the caller can repaint the
+        aggregate status without moving the user off their Plugin.
         """
         if html:
             self.summary_view.setHtml(text_or_html)
@@ -863,63 +674,45 @@ class SidePanel:
             self._info_toggle_widget.hide()
 
     def _reposition_info_toggle(self) -> None:
-        """Stretch the Info gutter across the info_view width.
+        """Stretch the Info gutter across the ``info_view`` width.
 
-        The gutter now carries a left-aligned ``README: <Plugin>``
-        header AND the right-aligned Preview/Markdown toggle. Span
-        the full content width minus the side margins so the label
-        anchors flush-left and the toggle anchors flush-right.
+        It holds a left-aligned header and a right-aligned toggle.
         """
         if not self._info_toggle_widget.isVisible():
             return
         hint = self._info_toggle_widget.sizeHint()
-        margin = 6  # 4-base spacing scale; sits flush inside reserved viewport margin
+        margin = 6  # sits inside the reserved viewport margin
         width = max(hint.width(), self.info_view.width() - 2 * margin)
         self._info_toggle_widget.resize(width, hint.height())
         self._info_toggle_widget.move(margin, margin)
 
     def _set_info_mode(self, mode: str) -> None:
-        """Flip the Info tab between rendered Markdown ("preview") and raw
-        Markdown source ("source"). No-op if there is no plugin loaded.
-        """
+        """Flip the Info tab between ``preview`` and ``source`` mode."""
         if mode not in ("preview", "source"):
             return
         self._info_mode = mode
         self._render_info()
 
     def _render_info(self) -> None:
-        """Render the currently-loaded Info plugin per the active mode.
+        """Render the loaded Info plugin in the active mode.
 
-        The rendered body is the README's verbatim markdown with NO
-        injected front matter. The plugin-name ``README: <Plugin>``
-        caption lives in the gutter widget alongside the Preview/Markdown
-        toggle. The provenance line (``from <folder>``) is dropped
-        entirely: it was visual noise that duplicated info available
-        elsewhere in the panel.
+        The README body is verbatim. The caption lives in the gutter widget
+        and ``provenance`` is not shown at all.
         """
         if self._info_plugin is None:
             return
         detail = self._info_plugin
         md = detail.body
         if self._info_mode == "preview" and hasattr(self.info_view, "setMarkdown"):
-            # QTextBrowser.setMarkdown is present in Qt 5.14+ / 6.x. Nuke 16
-            # ships PySide6 6.5.3 so this path is always live. After the
-            # parser populates the document, walk each block and inject
-            # margins - see ``_apply_markdown_block_spacing`` for why this
-            # post-process is required instead of a CSS stylesheet.
+            # setMarkdown exists in Qt 5.14+, so this path is always live in
+            # Nuke. The parser leaves near-zero block margins, which
+            # ``_apply_markdown_block_spacing`` then rewrites.
             self.info_view.setMarkdown(md)
             self._apply_markdown_block_spacing()
         else:
-            # Raw Markdown source view - verbatim what the README author wrote.
-            #
-            # Wrap in <pre> via setHtml rather than setPlainText: Qt's
-            # QTextDocument retains char-format state from the prior
-            # setMarkdown call (e.g. an inherited link colour from a
-            # rendered Markdown link), and setPlainText alone does NOT
-            # reset that state, so the raw view would inherit the blue
-            # link tint. setHtml with an explicit <pre> style gives full
-            # control over colour + monospace rendering and naturally
-            # signals "this is raw source".
+            # setHtml with an explicit <pre>, not setPlainText. The document
+            # keeps character-format state from the previous setMarkdown
+            # call, so plain text would inherit the blue link colour.
             self.info_view.setHtml(
                 "<pre style='color:#c8c8c8; "
                 "font-family: Menlo, Monaco, Consolas, monospace; "
@@ -930,35 +723,22 @@ class SidePanel:
     def _apply_markdown_block_spacing(self) -> None:
         """Override per-block margins on ``info_view``'s document.
 
-        Qt's Markdown parser builds the document with near-zero
-        ``topMargin`` / ``bottomMargin`` on every QTextBlockFormat,
-        collapsing the visual rhythm of the source. ``setDefaultStyleSheet``
-        does not apply on this path (HTML-only). Walking the document and
-        rewriting each block's format is the only reliable lever.
+        Qt's Markdown parser sets near-zero margins on every block, and
+        ``setDefaultStyleSheet`` does not apply here. Rewriting each block
+        format is the only lever. Margins in px, top / bottom:
 
-        Per-block margins (top / bottom px). These are sized so that
-        heading->paragraph and paragraph->heading boundaries read as
-        deliberate breathing room against the parser's near-zero baseline:
+          * h1                - 18 / 10
+          * h2                - 24 / 10
+          * h3                - 18 / 8
+          * h4+               - 12 / 6
+          * list item         - 4 / 4
+          * paragraph or code - 12 / 10
 
-          * h1 - 18 / 10
-          * h2 - 24 / 10
-          * h3 - 18 / 8
-          * h4+ - 12 / 6
-          * list item - 4 / 4  (the QTextList itself supplies
-                                indentation; per-item space is just
-                                enough to read each line distinctly)
-          * paragraph / fenced code - 12 / 10
-
-        Qt does not collapse adjacent block margins, so values sum across
-        the boundary (p bottom 10 + h2 top 24 -> 34 px between paragraph
-        and next heading; h2 bottom 10 + p top 12 -> 22 px between
-        heading and following paragraph).
+        Qt does not collapse adjacent margins, so the two values add across
+        a block boundary.
         """
-        # Qt symbols are imported via the compat module per the file's
-        # convention (no module-level Qt import - keeps this module
-        # importable headless). Re-import inside the method
-        # rather than caching on ``self`` so reloads pick up any compat
-        # shim changes.
+        # Re-imported here rather than cached on ``self``, so a reload picks
+        # up compat shim changes.
         from nsl import compat  # noqa: PLC0415
 
         QtGui = compat.QtGui
@@ -989,18 +769,12 @@ class SidePanel:
 
     @staticmethod
     def _set_text(view, text: str) -> None:  # type: ignore[no-untyped-def]
-        """Set the visible text on a ``QTextBrowser`` - plain text path.
-
-        Placeholders are pure prose; using ``setPlainText`` keeps backticks etc.
-        verbatim so the placeholder wording reads identically in the UI.
-        """
+        """Set the visible text. Plain text keeps backticks verbatim."""
         view.setPlainText(text)
 
 
 def _html_escape(text: str) -> str:
-    """Escape ``&``, ``<``, ``>`` so tracebacks containing angle brackets render
-    intact in the Log tab's HTML wrapper.
-    """
+    """Escape ``&``, ``<`` and ``>`` for the HTML wrappers."""
     return (
         text.replace("&", "&amp;")
         .replace("<", "&lt;")
@@ -1009,22 +783,19 @@ def _html_escape(text: str) -> str:
 
 
 def _open_path_in_editor(path: Optional[str]) -> bool:
-    """Open *path* in the OS default text editor. Best-effort, never raises.
+    """Open *path* in the OS default text editor. Never raises.
 
-    Returns True if a launch was attempted, False if the path is missing /
-    not a file. Per-OS behaviour:
+    Returns True if a launch was attempted, False if *path* is not a file.
 
-    * macOS - ``open -t`` opens the user's default *text editor* (rather than
-      whatever app ``.py`` is associated with, which might try to *run* it).
-    * Windows - the ``edit`` shell verb (registered editor), falling back
-      to Notepad. NEVER the default verb: with a Python install present,
-      the ``.py`` default association is typically py.exe, which would
-      EXECUTE the plugin's script instead of opening it - the same hazard
-      the macOS ``-t`` flag dodges.
-    * Linux - ``xdg-open`` uses the default handler.
+    * macOS   - ``open -t`` forces the text editor, not the ``.py`` file
+                association, which might run the file.
+    * Windows - the ``edit`` verb, falling back to Notepad. Never the
+                default verb. For ``.py`` that is usually py.exe, which
+                would execute the Plugin's script.
+    * Linux   - ``xdg-open`` uses the default handler.
 
-    Uses the shell ``open``/``xdg-open`` tools rather than
-    ``QDesktopServices`` so we can force the text-editor intent.
+    The shell tools are used instead of ``QDesktopServices`` so the
+    text-editor intent can be forced.
     """
     import os
     import subprocess
