@@ -340,8 +340,8 @@ def _active_stack(registry) -> Optional[UndoStack]:
         return None
     if _is_global_active(registry.state):
         # Global has no stack. The auto-create flow flips the active
-        # Loadout during the op, so :func:`_handle_op_result` pushes the
-        # first entry onto the new Custom stack.
+        # Loadout during the op. :func:`_handle_op_result` then pushes
+        # the first entry onto the new Custom stack.
         return None
     return registry.undo_stacks.for_loadout(registry.state.active)
 
@@ -508,63 +508,49 @@ def _wire_loadout_strip(panel) -> None:
     strip.export_requested.connect(lambda: _on_export(panel))
     strip.panic_toggled.connect(lambda engaged: _on_panic_toggled(panel, engaged))
 
-    # Bottom-row floating Close button - prompts directly via
-    # ``_on_close_button`` (F11-reloadable, so it works without a full
-    # Nuke relaunch). The window-manager title-bar close is guarded
-    # separately by ``_LoadoutPanelHost.closeEvent``; a flag keeps the two
-    # from double-prompting. See :func:`_on_close_button` /
-    # :func:`should_close_panel`.
+    # The title-bar close is guarded separately, in
+    # ``_LoadoutPanelHost.closeEvent``. A flag stops both from prompting.
     close_button = getattr(panel, "close_button", None)
     if close_button is not None:
         close_button.clicked.connect(lambda: _on_close_button(panel))
 
 
 def _stem_from_dropdown(name: str) -> str:
-    """Dropdown row name → bare stem.
+    """Return the Loadout stem for a dropdown row name.
 
-    Row names ARE bare stems now (the ``.loadout`` display suffix is
-    retired); the function survives as the single seam between the strip
-    vocabulary and the domain ops, in case the display format grows
-    decoration again.
+    Row names are already bare stems, so this returns ``name`` as is.
+    It stays as the one place to change if that ever differs.
     """
     return name
 
 
 def _on_loadout_selected(panel, dropdown_name: str) -> None:
-    """Switch active Loadout - route the dispatcher flip through the domain seam.
+    """Switch the active Loadout through the domain seam.
 
-    The chosen file is read from disk; in-memory edits in the
-    previously-active Loadout are preserved (the per-Loadout undo stack stays
-    attached via the UndoStackRegistry).
+    The chosen file is read from disk. In-memory edits in the Loadout
+    being left are kept, along with its undo stack.
 
-    Selecting ``Global`` keeps the dispatcher pointing at the
-    reserved stem; the panel reads ``global_model`` (resolved at startup)
- - there is no per-loadout file to read for Global.
+    Global has no file to read, so the panel uses ``global_model``.
     """
     registry = _registry(panel)
     stem = _stem_from_dropdown(dropdown_name)
 
-    # Re-selecting the currently-active stem from the dropdown is a no-op.
-    # Without this guard, the handler reads the file from disk and
-    # ``apply_op_result`` overwrites the in-memory active_model, silently
-    # discarding unsaved edits.
+    # Without this guard a re-select reads the file from disk and
+    # ``apply_op_result`` drops the unsaved edits in ``active_model``.
     current_stem = registry.state.active if registry.state else ""
     if stem == current_stem:
         return
 
-    # Case B: the user-land ``Global_Loadout`` is hidden and never
-    # activatable while the Global copy exists. The dropdown doesn't
-    # list it, so this only fires on a stray programmatic emit.
+    # The user-land ``Global_Loadout`` cannot be activated while the
+    # Global copy exists. Only a stray programmatic emit reaches here.
     if stem == GLOBAL_LOADOUT_DIR_NAME and getattr(
         registry, "global_loadout_copy_exists", False
     ):
         return
 
     if stem == RESERVED_LOADOUT_STEM:
-        # No on-disk file for Global; flip the dispatcher directly via
-        # ``set_panic``'s sibling seam ``switch_active`` is only valid
-        # against real loadout folders, so we replicate its dispatcher
-        # write inline here.
+        # ``switch_active`` only accepts real loadout folders, so the
+        # dispatcher write is repeated inline here for Global.
         from dataclasses import replace
         new_state = replace(registry.state, active=stem)
         from nsl.boot.dispatcher import write_dispatcher
@@ -579,16 +565,14 @@ def _on_loadout_selected(panel, dropdown_name: str) -> None:
         _switch_to_custom_in_memory(registry)
         return
 
-    # Real user loadout - route through the domain seam so the
-    # dispatcher write and the file-read both flow through one path.
     op_result = loadout_ops.switch_active(
         registry.loadouts_dir, stem, registry.state
     )
     if op_result.is_blocked:
         registry.on_blocked(op_result.blocked)
         return
-    # ``switch_active`` returns the chain LoadoutModel; the panel still
-    # operates on the legacy LoadoutFile shape, so bridge here.
+    # ``switch_active`` returns a chain LoadoutModel. The panel still
+    # works on the legacy LoadoutFile shape, so bridge it here.
     chain_model = op_result.model
     bridged: Optional[LoadoutFile] = None
     if chain_model is not None:
@@ -602,31 +586,17 @@ def _on_loadout_selected(panel, dropdown_name: str) -> None:
                 for entry in chain_model.plugins
             },
         )
-    # path=None on purpose: a switch READS the target loadout and flips the
-    # dispatcher pointer (already written inside ``switch_active``); it never
-    # writes loadout CONTENT to disk. ``apply_op_result`` treats a non-None
-    # path as "this loadout's content was just saved", which defeats its
-    # pure-switch park/restore machinery - the outgoing loadout's unsaved
-    # edits wouldn't be parked, and a switch-back would reload clean from
-    # disk, silently dropping the edits. Custom already returns path=None and
-    # preserves correctly; this brings named loadouts to parity so dirty
-    # edits survive switch-away-and-back (still (*), no prompt). The
-    # close-panel guard remains scoped to the CURRENT loadout only; parked
-    # dirty loadouts are discarded on panel close without warning, by design.
+    # ``path`` stays None. A real path tells apply_op_result the file
+    # was saved. The edits in the outgoing Loadout are then lost on a
+    # switch back.
     bridged_result = loadout_ops.OpResult(
         path=None,
         model=bridged,  # type: ignore[arg-type]
         state=op_result.state,
     )
-    # Switching loadouts changes ONLY the on/off state of plugins - NOT the
-    # plugin directories. The folder list is session-stable: a directory the
-    # user added must survive a loadout switch.
-    #
-    # Loadouts carry on/off only; where the plugins live is not a per-switch
-    # concern. We leave ``user_plugin_dirs`` untouched and just rescan the
-    # SAME folders to repaint pill on/off against the new loadout. Re-deriving
-    # ``user_plugin_dirs`` from the switched-to loadout's FolderDecls would
-    # wipe any folder added under the previous loadout.
+    # A switch changes plugin on/off state only. Leave
+    # ``user_plugin_dirs`` alone and rescan the same folders. Re-deriving
+    # it from the new Loadout would drop a folder the user just added.
     registry.apply_op_result(bridged_result)
     scan = getattr(registry, "scan_and_refresh", None)
     if scan is not None:
@@ -656,12 +626,9 @@ def _on_duplicate(panel, dropdown_name: str) -> None:
 
     current_stem = _stem_from_dropdown(dropdown_name)
     if current_stem == RESERVED_LOADOUT_STEM:
-        # Duplicating Global produces a user Loadout with an empty
-        # deviation set (functionally identical to creating a new Loadout
-        # when Global is set). The Global model is a legacy
-        # LoadoutFile (dict-keyed) so we don't have a chain LoadoutModel
-        # to seed from directly - call ``create`` with no base; the
-        # in-memory bridge will catch up on the next Save.
+        # Duplicating Global gives a user Loadout with no deviations. The
+        # Global model is a legacy LoadoutFile, so there is no chain model
+        # to seed from. The next Save fills it in.
         result = loadout_ops.create(
             registry.loadouts_dir,
             new_name,
@@ -671,15 +638,9 @@ def _on_duplicate(panel, dropdown_name: str) -> None:
         _handle_op_result(panel, result)
         return
 
-    # Duplicate IS Save As under a new name - the two buttons are
-    # intentionally near-identical. Build the new loadout from the
-    # IN-MEMORY active model so unsaved edits (enable + GUI-only toggles)
-    # travel into the copy, then write + switch + mark clean (same path as
-    # ``_on_save_as``).
-    #
-    # Building from the in-memory model (rather than copying the on-disk
-    # file) ensures unsaved edits - notably GUI-only toggles, which live in
-    # memory until Save - travel into the copy instead of being dropped.
+    # Duplicate is Save As under a new name. Build from the in-memory
+    # model, not the file on disk. Unsaved GUI-only toggles then travel
+    # into the copy instead of being dropped.
     if registry.active_model is None:
         return
     chain_model = _build_chain_model(registry, current_stem, registry.active_model)
@@ -702,8 +663,8 @@ def _on_delete(panel, dropdown_name: str) -> None:
         stem,
         registry.state,
     )
-    # Drop the per-Loadout undo stack so a fresh Loadout reusing the same
-    # stem doesn't inherit stale history (undo_stack.UndoStackRegistry.drop).
+    # Drop the undo stack so a new Loadout reusing this stem does not
+    # inherit the old history.
     if isinstance(registry.undo_stacks, UndoStackRegistry):
         registry.undo_stacks.drop(stem)
     _handle_op_result(panel, result)
@@ -712,12 +673,9 @@ def _on_delete(panel, dropdown_name: str) -> None:
 def _on_revert(panel, dropdown_name: str) -> None:
     """Revert the active Loadout to its on-disk state.
 
-    Destructive: unsaved in-memory edits are discarded. Confirms via
-    :func:`nsl.ui.dialogs.confirm_revert_loadout`
-    before calling :meth:`Registry.revert_active_to_baseline`. The
-    strip's enable gating prevents this slot from firing when there's
-    nothing to revert (clean state, or Global active), but we still
-    guard here so a programmatic emit is no-op-safe.
+    Unsaved in-memory edits are discarded, so it confirms first. The
+    strip disables the button when there is nothing to revert, and the
+    guard here covers a programmatic emit.
     """
     registry = _registry(panel)
     if not registry.is_active_dirty:
@@ -732,16 +690,11 @@ def _on_revert(panel, dropdown_name: str) -> None:
 def _on_save(panel) -> None:
     """Save the active Loadout.
 
-    Disabled when Global is active or there are no unsaved changes; the
-    strip greys the button so this slot effectively never fires in those
-    conditions. We still guard here so a programmatic invocation is
-    no-op-safe.
+    The strip disables the button on Global and when nothing changed.
+    The guard here covers a programmatic call.
 
-    Custom redirects to the Save-As flow. Custom is the in-memory
-    wildcard scratch slot - it never persists to disk on its own. The
-    user-facing Save button is enabled on Custom for intuitive
-    discoverability, and this redirect makes Save behave as "save my
-    Custom edits under a new name."
+    Custom redirects to Save As. Custom is in-memory only and never
+    persists on its own, so Save means "save these edits under a name".
     """
     registry = _registry(panel)
     if registry.active_model is None:
@@ -753,9 +706,6 @@ def _on_save(panel) -> None:
     if active_stem == DEFAULT_CUSTOM_LOADOUT_STEM:
         _on_save_as(panel)
         return
-    # Bridge the in-memory LoadoutFile to a chain LoadoutModel using the
-    # on-disk file as the folder/var/prefix source, then hand the model
-    # to ``loadout_ops.save``.
     chain_model = _build_chain_model(registry, active_stem, registry.active_model)
     result = loadout_ops.save(
         registry.loadouts_dir,
@@ -789,11 +739,11 @@ def _on_save_as(panel) -> None:
 
 
 def _is_global_loadout_staging_save(registry, new_name: str) -> bool:
-    """Whether a Save As under ``new_name`` is the case-B staging save.
+    """Whether a Save As under ``new_name`` is the staging save.
 
-    True only when the Global copy of ``Global_Loadout`` exists AND the
-    typed name resolves to that stem. In case A (no copy) the name saves
-    as a completely normal loadout.
+    True only when the Global copy of ``Global_Loadout`` exists and the
+    typed name resolves to that stem. Without the copy it saves as a
+    normal Loadout.
     """
     if not getattr(registry, "global_loadout_copy_exists", False):
         return False
@@ -804,12 +754,11 @@ def _is_global_loadout_staging_save(registry, new_name: str) -> bool:
 
 
 def _stage_global_loadout(panel, registry, chain_model: LoadoutModel) -> None:
-    """Case-B staging save for ``Global_Loadout``.
+    """Staging save for ``Global_Loadout``.
 
-    Writes (or overwrites) ``<loadouts_dir>/Global_Loadout/init.py``
-    WITHOUT the usual Save As collision suffixing or active-pointer flip
-    to the hidden stem: the panel lands on the read-only Global view
-    (persisted, so boot agrees) and a message explains the copy step.
+    Writes ``<loadouts_dir>/Global_Loadout/init.py`` with no Save As
+    collision suffix and no flip to the hidden stem. The panel lands on
+    the read-only Global view and a dialog explains the copy step.
     """
     result = loadout_ops.save(
         registry.loadouts_dir,
@@ -846,38 +795,18 @@ def _stage_global_loadout(panel, registry, chain_model: LoadoutModel) -> None:
 def _close_needs_prompt(registry) -> bool:
     """Whether closing the panel should prompt the user to save.
 
-    True when EITHER:
+    True when the active Loadout is dirty, or when Custom is active and
+    at least one discovered plugin resolves to enabled. Custom never
+    persists, so those green pills are unsaved work.
 
-    * the active Loadout is value-dirty / force-dirty
-      (``is_active_dirty`` - a real edit since the last save), OR
-    * the active slot is **Custom with at least one DISCOVERED plugin whose
-      EFFECTIVE state is enabled** (i.e. a green/pending pill in the grid).
-      Custom is in-memory only and NEVER persists as a loadout, so an
-      enabled, on-disk-present plugin is unsaved work that won't load on the
-      next Nuke restart until the user Saves As. A freshly reopened pending
-      Custom reads value-*clean* against its Global baseline, yet closing it
-      without Save As still drops real intent: the pills are green but
-      nothing will load. So we must still prompt - a Custom(*) close must
-      offer to save.
+    Resolve the effective state the way the grid does, not from
+    ``active_model.plugins``. Switching to Custom from the dropdown
+    seeds the model from Global and leaves that dict empty while the
+    pills are green.
 
-      We resolve each discovered plugin's effective state the SAME way the
-      pill grid does (``ui.state.pill_state_from``): active entry > Global
-      entry > default-enabled. Checking the EFFECTIVE state, not the
-      explicit ``active_model.plugins`` dict, is essential - some Custom
-      entry paths leave the discovered plugins default-enabled WITHOUT
-      writing explicit entries. Concretely, switching to Custom from the
-      dropdown (``_on_loadout_selected``) seeds ``active_model`` from Global
-      and never reconciles the folder's plugins in, so the dict is empty
-      even though the grid shows green pills. An explicit-dict check would
-      return False there and let the panel close silently.
-
-      The discoverability gate matters: after the user removes the last
-      Plugins Folder, ``active_model`` may still carry stale entries for the
-      now-"Missing" plugins, but they aren't discovered any more, so the
-      loop skips them - and an empty Custom (no folders / no plugins) has
-      nothing to lose. So "removed the last folder → nothing to save →
-      close silently" is correct: with no plugin path added at all, it is
-      safe to close with no prompt.
+    Only discovered plugins count. After the last folder is removed the
+    stale entries are gone from the scan, so an empty Custom closes with
+    no prompt.
     """
     if getattr(registry, "is_active_dirty", False):
         return True
@@ -888,7 +817,6 @@ def _close_needs_prompt(registry) -> bool:
         global_model = getattr(registry, "global_model", None)
         discovered = getattr(registry, "discovered_plugins", None) or {}
         for name in discovered:
-            # Effective enabled state, resolved as the grid resolves it:
             # active entry > Global entry > default-enabled.
             entry = None
             if active_model is not None:
@@ -954,38 +882,21 @@ def should_close_panel(panel) -> bool:
         return False
     if choice == dialogs.CloseUnsavedChoice.SAVE:
         _on_save(panel)
-        # If the save didn't actually land (user cancelled the Save As
-        # prompt for Custom, or the op was blocked), cancel the close -
-        # treat as an implicit cancel so edits aren't lost. Re-use the same
-        # guard: a successful Save As flips the active slot to a named
-        # loadout (no longer Custom, value-clean) so this reads False and
-        # the close proceeds; a cancelled Save As leaves the pending Custom
-        # in place so this stays True and the close is held.
+        # A cancelled Save As leaves the pending Custom in place. The
+        # same guard then reads True and the close is held.
         if _close_needs_prompt(registry):
             return False
-    # DISCARD or SAVE-succeeded → allow the close. The caller's
-    # ``close()`` hides the widget; ``nsl.menu`` (line 117)
-    # checks ``not _panel_instance.isVisible()`` on the next open and
-    # constructs a fresh ``_LoadoutPanelHost``, which builds a new
-    # ``Registry`` from boot scratch. Net effect: "Don't Save" discards
-    # in-memory edits across the board, and the next panel open shows the
-    # saved-on-disk state. Matches the floating Close button's
-    # "Any unsaved changes will be lost." prompt copy.
+    # The next panel open builds a fresh Registry from disk, so Don't
+    # Save discards every in-memory edit.
     return True
 
 
 def _on_close_button(panel) -> None:
     """Bottom-row floating Close button handler.
 
-    Runs the unsaved-changes guard HERE (this module is F11-reloadable, so
-    the button works the instant the UI is reloaded - no full Nuke
-    relaunch needed) and then closes. Sets ``_nsl_close_confirmed`` on the
-    panel so the window-manager ``closeEvent`` guard
-    (``nsl.menu._LoadoutPanelHost.closeEvent``, which only
-    reloads on a relaunch) does NOT re-prompt for this same close. When
-    that override is present it sees the flag and accepts immediately;
-    when it is absent (pre-relaunch) ``panel.close()`` just closes - either
-    way the prompt fires exactly once, from here.
+    Runs the unsaved-changes guard here, so the button works as soon as
+    the UI reloads. ``_nsl_close_confirmed`` stops the window-manager
+    ``closeEvent`` guard from prompting a second time for this close.
     """
     if should_close_panel(panel):
         setattr(panel, "_nsl_close_confirmed", True)
@@ -995,12 +906,9 @@ def _on_close_button(panel) -> None:
 def _on_import(panel) -> None:
     """Import a chain-format loadout file into the user's loadouts dir.
 
-    Reads the source file as a chain ``LoadoutModel``, sanitises the
-    destination stem from the source filename, and routes the write
-    through ``loadout_ops.save`` (which also creates the folder + flips
-    the dispatcher active pointer via ``save_as``). Blocked names land
-    on ``on_blocked``; missing / malformed source files surface via the
-    usual handler.
+    The stem comes from the source filename. ``save_as`` creates the
+    folder and flips the dispatcher pointer. A blocked name or an
+    unreadable source goes to ``on_blocked``.
     """
     registry = _registry(panel)
     source = registry.prompt_import()
@@ -1030,14 +938,11 @@ def _on_import(panel) -> None:
 
 
 def _on_export(panel) -> None:
-    """Export the active loadout as a Loadout FOLDER to a user path.
+    """Export the active Loadout as a Loadout folder to a user path.
 
-    Builds the chain ``LoadoutModel`` from the in-memory active model,
-    then writes it as ``<chosen folder>/init.py`` (``prompt_export``
-    returns the folder; ``write_atomic`` lazily creates it). The folder
-    is a complete, droppable loadout - no rename needed on arrival.
-    ``mark_clean`` is intentionally not toggled - Export does not commit
-    the on-disk active loadout.
+    Writes ``<chosen folder>/init.py`` from the in-memory model. The
+    folder is a complete Loadout, ready to drop in. ``mark_clean`` stays
+    untouched, because Export does not commit the active Loadout.
     """
     registry = _registry(panel)
     if registry.active_model is None:
@@ -1061,33 +966,26 @@ def _on_export(panel) -> None:
 
 
 def _on_panic_toggled(panel, engaged: bool) -> None:
-    """Panic button - engage / release through ``loadout_ops.set_panic``.
+    """Panic button - engage or release through ``loadout_ops.set_panic``.
 
-    Panic lives in the dispatcher (``~/.nuke/loadouts/init.py``) as the
-    ``PANIC_MODE`` constant. The set_panic seam writes the dispatcher
-    atomically and returns the updated state; we forward through the
-    standard refresh path so the registry stays in sync.
-
-    One Panic flip = one undo step. Panic is global state, but the
-    entry lands on the stack of the loadout active at flip time (the
-    stacks are per-loadout); replay re-runs ``set_panic``, and the
-    panel refresh re-syncs the button.
+    One flip pushes one undo step. Panic is global, but the stacks are
+    per-Loadout, so the entry lands on the Loadout active at flip time.
     """
     registry = _registry(panel)
     previous = bool(getattr(registry.state, "panic", False))
     result = loadout_ops.set_panic(
         registry.loadouts_dir, engaged, registry.state
     )
-    # set_panic returns an OpResult with model=None. The panel's
-    # active_model should not change on a panic flip, so preserve it.
+    # ``set_panic`` returns ``model=None``. A panic flip must not change
+    # ``active_model``, so carry it forward.
     forward = loadout_ops.OpResult(
         path=result.path,
         model=registry.active_model,  # type: ignore[arg-type]
         state=result.state,
     )
     registry.apply_op_result(forward)
-    # Skip the push when the flip is a no-op (a stray signal that
-    # re-asserts the current state must not burn an undo step).
+    # A stray signal that re-asserts the current state must not burn an
+    # undo step.
     if previous != bool(engaged) and isinstance(
         registry.undo_stacks, UndoStackRegistry
     ):
@@ -1116,17 +1014,14 @@ def _wire_top_toolbar(panel) -> None:
 def _on_undo(panel) -> None:
     """Pop the most recent entry from the active stack.
 
-    The wiring layer signals the intent and surfaces the entry back to the
-    panel via ``registry.apply_undo``; replaying the entry's payload onto
-    the active model is the registry's job.
+    The entry is an opaque payload here. Replaying it onto the active
+    model is ``registry.apply_undo``'s job.
     """
     registry = _registry(panel)
     stack = _active_stack(registry)
     if stack is None or not stack.can_undo:
         return
     entry = stack.undo()
-    # Surface to the panel - the registry decides how to replay; for the
-    # wiring layer the entry is an opaque payload.
     apply = getattr(registry, "apply_undo", None)
     if apply is not None:
         apply(entry)
@@ -1148,11 +1043,9 @@ def _on_redo(panel) -> None:
 def _sync_undo_toolbar(panel) -> None:
     """Reflect the active stack's can_undo / can_redo on the top toolbar.
 
-    Without this, the Undo / Redo buttons never enable after the first pill
-    toggle: the loadout-switch wiring only refreshes availability on
-    loadout-switch events. ``refresh_from_registry`` in panel.py also
-    invokes this helper so registry mutations that bypass the wiring layer
-    keep the toolbar in sync.
+    Call it after any push. The loadout-switch wiring only refreshes on
+    a switch, so without this the buttons stay disabled after the first
+    pill toggle.
     """
     toolbar = getattr(panel, "top_toolbar", None)
     set_undo = getattr(toolbar, "set_undo_available", None)
@@ -1192,21 +1085,12 @@ def _wire_folder_card(panel) -> None:
 
 
 def _discovered_names_from_folder(registry, folder_path: str) -> list:
-    """Discovered plugin names sourced from *folder_path*, matched by
-    NORMALISED path.
+    """Discovered plugin names sourced from *folder_path*.
 
-    ``folder_ops.add_folder`` stores the *normalised* path in the
-    ``FolderDecl`` (``os.path.normpath``), and the scanner records that
-    same normalised path as each plugin's ``source``. But the raw path
-    handed back by the directory picker (``prompt_add_folder`` →
-    ``QFileDialog.getExistingDirectory``) frequently carries a trailing
-    slash (or ``.`` / ``..`` segments). Comparing the raw picked string
-    directly against the normalised ``source`` matches NOTHING, which would
-    keep a folder-add from landing any plugin in the ceremonial-save set -
-    leaving ``is_active_dirty`` False and the Close button's unsaved-changes
-    prompt silent. Adding a Plugins Folder to Custom is unambiguously a
-    changed state (the discovered plugins are pending and only become real
-    on Save), so the match must be robust to path representation.
+    Paths are compared in canon form. The directory picker returns a raw
+    path, often with a trailing slash, while ``source`` holds the
+    normalised one. A raw comparison matches nothing, and the folder add
+    then leaves the Loadout looking clean.
     """
     target = canon_for_compare(folder_path)
     discovered = getattr(registry, "discovered_plugins", None) or {}
@@ -1217,13 +1101,10 @@ def _discovered_names_from_folder(registry, folder_path: str) -> list:
 
 
 def _persist_folder_authority(registry) -> None:
-    """Write the Plugins Folder list to the dispatcher and sync every loadout.
+    """Write the Plugins Folder list to the dispatcher and sync every Loadout.
 
-    Thin delegate: the authority-write logic lives on
-    :meth:`Registry.persist_folder_authority` so undo / redo replay and
-    Revert can re-persist without reaching back into the wiring layer.
-    Guarded so stand-in registries without the method stay usable (their
-    folder list just isn't persisted, same as their other missing hooks).
+    The logic lives on :meth:`Registry.persist_folder_authority`, so undo
+    replay and Revert can re-persist without calling the wiring layer.
     """
     persist = getattr(registry, "persist_folder_authority", None)
     if persist is not None:
@@ -1231,14 +1112,11 @@ def _persist_folder_authority(registry) -> None:
 
 
 def _model_side_snapshot(registry) -> dict:
-    """One side (previous or next) of a ``folder_op`` undo entry.
+    """One side, previous or next, of a ``folder_op`` undo entry.
 
-    The model and the ceremonial-save set are snapshotted wholesale -
-    both are per-loadout, so replay can restore them without inverse
-    logic. The folder list itself is NOT snapshotted; the entry carries
-    a per-op delta instead (folders are global across loadouts, and a
-    full-list restore from this loadout's stack could clobber folder
-    changes made later from another loadout).
+    The model is snapshotted whole, because it is per-Loadout. The
+    folder list is not. Folders are global, so the entry carries a delta
+    instead, or a restore would undo folder changes made elsewhere.
     """
     model = registry.active_model
     cloned = (
@@ -1255,12 +1133,9 @@ def _model_side_snapshot(registry) -> dict:
 def _push_folder_undo_entry(registry, payload: dict, previous: dict) -> None:
     """Push one compound undo entry for a folder op.
 
-    Mirrors :func:`_push_undo_entry`: one folder add / remove / reorder
-    is one undo step on the post-op active Loadout's stack. ``payload``
-    carries the op kind + delta fields; ``previous`` is the
-    :func:`_model_side_snapshot` taken before the op ran. The matching
-    ``next`` side is captured here, after the op - post-rescan, so the
-    reconcile pass's auto-enable entries are included for redo.
+    One folder add, remove or reorder is one undo step. The ``next`` side
+    is taken here, after the rescan, so redo includes what the reconcile
+    pass turned on.
     """
     if not isinstance(registry.undo_stacks, UndoStackRegistry):
         return
@@ -1273,17 +1148,12 @@ def _push_folder_undo_entry(registry, payload: dict, previous: dict) -> None:
 
 
 def _on_add_folder(panel) -> None:
-    """Add a Plugins Folder to the active loadout.
+    """Add a Plugins Folder to the active Loadout.
 
-    Routing depends on what the active pointer currently names:
-
-    * **First-run / Global / Custom** - no on-disk loadout file to
-      mutate. The folder is added to the in-memory Custom slot, the
-      scanner picks it up, pills surface; nothing is written to disk
-      until the user clicks Save As. This is the Custom-as-wildcard
-      behaviour: no silent "default" auto-materialisation to disk.
-    * **Real named loadout** - read the chain ``LoadoutModel`` from
-      disk, call ``folder_ops.add_folder_and_save``, refresh.
+    On first run, Global or Custom there is no file to change, so the
+    folder goes into the in-memory Custom slot and reaches disk only on
+    Save As. A named Loadout goes through
+    ``folder_ops.add_folder_and_save``.
     """
     registry = _registry(panel)
     chosen = registry.prompt_add_folder()
@@ -1298,8 +1168,6 @@ def _on_add_folder(panel) -> None:
         if _add_folder_in_memory(registry, chosen):
             _sync_undo_toolbar(panel)
         return
-    # Previous side of the undo entry - captured before any mutation so
-    # undo can restore the pre-add model + ceremonial-save set.
     previous = _model_side_snapshot(registry)
     loadout_init = _chain_loadout_path(registry, active_stem)
     try:
@@ -1312,9 +1180,6 @@ def _on_add_folder(panel) -> None:
             loadout_path=loadout_init,
         )
     except folder_ops.FolderAlreadyConfigured:
-        # Adding the same folder twice is a no-op surfaced via the existing
-        # folder list. Pass through to the panel so it can show a
-        # user-readable message; the registry decides on the UI.
         already = getattr(registry, "on_folder_already_configured", None)
         if already is not None:
             already(chosen)
@@ -1329,47 +1194,24 @@ def _on_add_folder(panel) -> None:
         model=registry.active_model,  # type: ignore[arg-type]
         state=registry.state,
     )
-    # Mirror folder_ops result into the registry's user_plugin_dirs so
-    # the scanner walks the just-added path on the rescan below.
     registry.user_plugin_dirs = [decl.path for decl in result.model.folders]
     registry.apply_op_result(new_op)
-    # Folders are dispatcher-authoritative: persist the list to the
-    # dispatcher and sync it into every loadout (not just this active one).
     _persist_folder_authority(registry)
-    # Adding a folder must trigger a scan so pills for the newly-configured
-    # plugins appear immediately. The apply_op_result above only syncs
-    # settings + active_model and refreshes; without an explicit rescan the
-    # grid stays empty.
-    #
-    # ``scan_and_refresh`` also reconciles newly-discovered plugins
-    # into the active Loadout (auto-enabling any plugin not yet
-    # decided in active or Global). The reconciliation lives there
-    # rather than here so boot bootstrap and explicit rescan both
-    # benefit from it - a folder added in a previous session whose
-    # plugins were never saved into the active Loadout would
-    # otherwise sit in "+N pending, can't save" limbo on every
-    # restart. See ``Registry._reconcile_discovered_into_active``.
+    # ``apply_op_result`` does not scan, so the grid would stay empty
+    # without this. The scan also reconciles the new plugins into the
+    # active Loadout, so they do not sit pending on every restart.
     scan = getattr(registry, "scan_and_refresh", None)
     if scan is not None:
         scan()
-    # Ceremonial-save set - adding a Plugins Folder opens the Save
-    # affordance for JUST the newly-added folder's plugins (other
-    # plugins keep their saved-glow / value-based dirty state).
-    # The scan above just populated ``discovered_plugins``; pick the
-    # names whose source matches the folder we just added. Loadout
-    # entries are preserved on remove, so a re-add against pre-saved
-    # entries would leave M == D and Save greyed without this scoped
-    # force-dirty. The set clears on Save / Save As / loadout switch, and
-    # is scoped so unrelated saved-glow pills don't get cleared.
+    # Mark only the new folder's plugins dirty. Loadout entries survive a
+    # remove, so a re-add would otherwise match on disk and leave Save
+    # greyed out.
     mark = getattr(registry, "mark_plugins_force_dirty", None)
     if mark is not None:
         new_names = _discovered_names_from_folder(registry, chosen)
         if new_names:
             mark(new_names)
-    # One folder-add = one undo step. ``add_folder`` PREPENDS, so record
-    # the path's actual post-op index for redo. Pushed after the rescan
-    # + force-dirty mark so the entry's "next" side captures the state
-    # redo must restore.
+    # ``add_folder`` prepends, so record the real post-op index for redo.
     dirs_now = list(getattr(registry, "user_plugin_dirs", []) or [])
     added_path = os.path.normpath(chosen)
     _push_folder_undo_entry(
@@ -1386,20 +1228,13 @@ def _on_add_folder(panel) -> None:
 
 
 def _add_folder_in_memory(registry, chosen: str) -> bool:
-    """Add a folder to the in-memory Custom slot without writing to disk.
+    """Add a folder to the in-memory Custom slot, with no Loadout write.
 
-    Used for the three "no on-disk loadout to mutate" cases - first-run
-    (no active pointer), Global-active (read-only), Custom-already-
-    active (in-memory wildcard). The folder is appended to
-    ``registry.user_plugin_dirs`` so the scanner walks it, the state
-    flips to Custom-active in memory so pills resolve under the
-    user-loadout rules (default-enabled = green pending), and the
-    newly-discovered plugins land in the ceremonial-save set so Save
-    opens. No dispatcher write - Custom is the wildcard slot, the
-    dispatcher only materialises on Save / Save As.
+    Used on first run, on Global and on Custom. The state flips to
+    Custom in memory so pills resolve under the user-Loadout rules, and
+    the new plugins are marked dirty so Save opens.
 
-    Returns ``True`` when the folder landed (one undo entry pushed),
-    ``False`` when validation rejected it.
+    ``True`` when the folder landed, ``False`` when validation rejected it.
     """
     from dataclasses import replace
 
@@ -1408,13 +1243,9 @@ def _add_folder_in_memory(registry, chosen: str) -> bool:
         registry.state
         and registry.state.active == DEFAULT_CUSTOM_LOADOUT_STEM
     )
-    # Previous side of the undo entry. When this op auto-creates Custom
-    # (Global / first-run view), the pre-op model is None - but undo
-    # keeps Custom active (per-loadout stacks can't restore the Global
-    # view's pointer), and a None model under a Custom pointer would
-    # dead-end pill toggles. Snapshot the empty seeded Custom instead:
-    # its sparse plugins resolve through Global fallback, so it renders
-    # the same state the user was looking at before the add.
+    # When this op creates Custom the pre-op model is None, and undo
+    # keeps Custom active. A None model under a Custom pointer would
+    # dead-end pill toggles, so snapshot an empty Custom instead.
     if registry.active_model is not None:
         prev_model = LoadoutFile(
             name=registry.active_model.name,
@@ -1447,9 +1278,8 @@ def _add_folder_in_memory(registry, chosen: str) -> bool:
         return False
 
     registry.user_plugin_dirs = [decl.path for decl in result.model.folders]
-    # The fix for the close/reopen data loss: even on Custom (which never
-    # writes its on/off to disk), the FOLDER is dispatcher-authoritative and
-    # must persist. This writes it to the dispatcher + syncs all loadouts.
+    # Custom never writes its on/off state. The folder still lives in the
+    # dispatcher and must persist, or it is lost on reopen.
     _persist_folder_authority(registry)
 
     new_state = replace(registry.state, active=DEFAULT_CUSTOM_LOADOUT_STEM)
@@ -1475,10 +1305,8 @@ def _add_folder_in_memory(registry, chosen: str) -> bool:
         if new_names:
             mark(new_names)
 
-    # Pin the Revert folder baseline to the pre-op list when this op
-    # created Custom: ``apply_op_result``'s switch-snapshot ran mid-op
-    # (after the dirs mutation) and captured the post-add list, which
-    # would make this very first add un-revertable.
+    # ``apply_op_result`` snapshotted the list after the add. Pin the
+    # Revert baseline back, or the first add cannot be reverted.
     if not was_custom:
         pin = getattr(registry, "set_folder_baseline", None)
         if pin is not None:
@@ -1500,25 +1328,21 @@ def _add_folder_in_memory(registry, chosen: str) -> bool:
 
 
 def _remove_folder_in_memory(registry, path: str) -> bool:
-    """Remove a folder from the in-memory Custom slot (no on-disk file).
+    """Remove a folder from the in-memory Custom slot.
 
-    The remove-direction mirror of :func:`_add_folder_in_memory`, for the
-    "no on-disk loadout to rewrite" case (Custom-active; first-run/Global are
-    handled by the early return in :func:`_on_remove_folder`). Drops ``path``
-    from ``user_plugin_dirs`` and re-runs the scanner so the removed folder's
-    plugins leave ``discovered_plugins`` - and therefore the grid. No
-    dispatcher / file write - Custom is the wildcard slot.
+    The mirror of :func:`_add_folder_in_memory`. The rescan drops the
+    folder's plugins from ``discovered_plugins``, so they leave the grid.
 
-    Returns ``True`` when the folder was dropped (one undo entry
-    pushed), ``False`` when ``path`` wasn't configured.
+    ``True`` when the folder was dropped, ``False`` when it was not
+    configured.
     """
     prev_dirs = list(getattr(registry, "user_plugin_dirs", []) or [])
     if path not in prev_dirs:
         return False
     previous = _model_side_snapshot(registry)
     registry.user_plugin_dirs = [p for p in prev_dirs if p != path]
-    # Folders persist in the dispatcher even on Custom - removal updates the
-    # authority and prunes the folder (and its plugin calls) from every loadout.
+    # Folders persist in the dispatcher even on Custom. A removal prunes
+    # the folder and its plugin calls from every Loadout.
     _persist_folder_authority(registry)
     scan = getattr(registry, "scan_and_refresh", None)
     if scan is not None:
@@ -1538,47 +1362,24 @@ def _remove_folder_in_memory(registry, path: str) -> bool:
 
 def _on_remove_folder(panel, path: str) -> None:
     registry = _registry(panel)
-    # The Global Plugins row is read-only - only the Global
-    # configuration controls it (the ``<nsl_root>/Global/`` convention,
-    # ``NSL_GLOBAL_PLUGIN_DIRS``, or both). The FolderRow
-    # already hides the ✕ control for ``is_global`` rows; this is the
-    # defensive belt so a stray signal (test fixtures, future
-    # regression) never ends up calling
-    # ``folder_ops.remove_folder_and_save`` with the marker path.
+    # The Global Plugins row is read-only. FolderRow hides its remove
+    # control, and this guard covers a stray signal.
     from nsl.constants import GLOBAL_PLUGINS_FOLDER_SENTINEL
     if path == GLOBAL_PLUGINS_FOLDER_SENTINEL:
         return
     active_stem = registry.state.active if registry.state else ""
-    # In-memory slots - Custom (explicit stem) AND the empty active pointer
-    # that the strip RENDERS as "Custom(*)" (first-run with no Global layer,
-    # or a post-reopen Custom session whose active pointer was never
-    # persisted - see ``_active_strip_name``). None of these have an on-disk
-    # loadout init.py to rewrite, but folders are dispatcher-authoritative
-    # and must still be pruned + re-persisted.
-    #
-    # Route every in-memory slot to the in-memory prune, mirroring
-    # ``_on_add_folder``'s first-run/Global/Custom routing. Blanket-returning
-    # on the empty / RESERVED case would silently no-op a removal while the
-    # strip shows "Custom(*)" with an empty active pointer: the folder would
-    # stay in the dispatcher and its plugins in the grid (surviving a panel
-    # close/reopen). The read-only Global *marker* row was already handled
-    # above; user folders are never Global folders, so this never
-    # touches the Global plugins dir.
+    # Every in-memory slot routes to the in-memory prune, like
+    # ``_on_add_folder`` does. An empty active pointer still renders as
+    # Custom. Returning here would leave the folder in the dispatcher.
     if (
         not active_stem
         or active_stem == RESERVED_LOADOUT_STEM
         or active_stem == DEFAULT_CUSTOM_LOADOUT_STEM
     ):
-        # Only act on a path the user actually has configured - a genuine
-        # first-run slot (no user folders) has no removable rows to click,
-        # so an unmatched path is a harmless no-op rather than a redundant
-        # dispatcher rewrite.
         user_dirs = list(getattr(registry, "user_plugin_dirs", []) or [])
         if path in user_dirs and _remove_folder_in_memory(registry, path):
             _sync_undo_toolbar(panel)
         return
-    # Previous side of the undo entry - captured before the disk write
-    # so undo can restore the pre-remove model + ceremonial-save set.
     prev_dirs = list(getattr(registry, "user_plugin_dirs", []) or [])
     previous = _model_side_snapshot(registry)
     loadout_init = _chain_loadout_path(registry, active_stem)
@@ -1604,21 +1405,13 @@ def _on_remove_folder(panel, path: str) -> None:
     )
     registry.user_plugin_dirs = [decl.path for decl in result.model.folders]
     registry.apply_op_result(new_op)
-    # Dispatcher is the folder authority: persist the removal + prune the
-    # folder's plugin calls from every loadout (no dangling var refs).
     _persist_folder_authority(registry)
-    # Mirror the add-folder path: re-run the scanner so
-    # ``discovered_plugins`` drops the removed folder's plugins.
-    # Without this, ``_plugin_key_union`` keeps reading the stale
-    # entries and the grid still shows pills sourced from the
-    # removed folder until the next manual rescan or restart - a
-    # removed folder must take its plugins out of the grid immediately,
-    # not just out of the folder list.
+    # Without the rescan the grid keeps showing pills from the removed
+    # folder until the next manual rescan or restart.
     scan = getattr(registry, "scan_and_refresh", None)
     if scan is not None:
         scan()
-    # One folder-remove = one undo step; the recorded index lets undo
-    # re-insert the folder where it was.
+    # The recorded index lets undo put the folder back where it was.
     _push_folder_undo_entry(
         registry,
         {
@@ -1634,19 +1427,16 @@ def _on_remove_folder(panel, path: str) -> None:
 
 def _on_reorder(panel, new_order) -> None:
     registry = _registry(panel)
-    # The folder card may emit the Global marker as part of its
-    # path order (it's the last row). The persisted user-folders
-    # list contains real paths only - strip the marker before
-    # handing the order to ``folder_ops.reorder_and_save``.
+    # The folder card includes the Global marker in its order. The
+    # persisted list holds real paths only, so strip the marker first.
     from nsl.constants import GLOBAL_PLUGINS_FOLDER_SENTINEL
     real_order = [p for p in new_order if p != GLOBAL_PLUGINS_FOLDER_SENTINEL]
     active_stem = registry.state.active if registry.state else ""
     if not active_stem or active_stem == RESERVED_LOADOUT_STEM:
         return
     if active_stem == DEFAULT_CUSTOM_LOADOUT_STEM:
-        # Custom has no on-disk loadout to reorder. Folders are
-        # dispatcher-authoritative now, so reorder the authority directly:
-        # keep known paths in the requested order, persist + sync.
+        # Custom has no file to reorder, so reorder the dispatcher list
+        # directly and keep only the paths already known.
         prev_dirs = list(getattr(registry, "user_plugin_dirs", []) or [])
         previous = _model_side_snapshot(registry)
         known = set(prev_dirs)
@@ -1655,8 +1445,7 @@ def _on_reorder(panel, new_order) -> None:
         scan = getattr(registry, "scan_and_refresh", None)
         if scan is not None:
             scan()
-        # A reorder that lands in the same order is a no-op for undo -
-        # don't burn a step on it.
+        # A reorder that changes nothing must not burn an undo step.
         if list(registry.user_plugin_dirs) != prev_dirs:
             _push_folder_undo_entry(
                 registry,
@@ -1692,11 +1481,9 @@ def _on_reorder(panel, new_order) -> None:
     )
     registry.user_plugin_dirs = [decl.path for decl in new_model.folders]
     registry.apply_op_result(new_op)
-    # Dispatcher is the folder authority: persist the new order + sync it
-    # into every loadout (entries remapped by path so they stay correct).
+    # Entries are remapped by path, so they stay correct after the sync.
     _persist_folder_authority(registry)
-    # One reorder = one undo step; skip the push when the order didn't
-    # actually change.
+    # A reorder that changes nothing must not burn an undo step.
     if list(registry.user_plugin_dirs) != prev_dirs:
         _push_folder_undo_entry(
             registry,
@@ -1806,20 +1593,12 @@ def _on_folder_deselect(panel, path: str) -> None:
 def _apply_folder_visibility_to_grid(panel) -> None:
     """Rebuild the grid's key list so hidden folders contribute no pills.
 
-    Capture + restore grid selection around the ``set_keys`` call so the
-    user's pill selection survives the folder-visibility flip. This path
-    runs BEFORE the filter
-    pipeline's parallel handler (both are connected to the same
-    ``visibility_changed`` signal; Qt fires in connect order, and
-    ``wire_events`` runs first). Without selection preservation
-    here, ``set_keys`` would unconditionally clear ``grid._selected``
-    and emit ``selection_changed([])`` - that empty signal would
-    propagate to the selection bridge and to ``_maybe_clear_engaged``
-    (which then greys every orange folder-select button when it
-    deferred-fires). The pipeline's parallel handler also captures +
-    restores, so both paths are now equivalent; the duplicate is
-    retained because legacy test fixtures don't always wire the
-    pipeline.
+    The selection is captured and restored around ``set_keys``. Without
+    that, ``set_keys`` clears the selection and emits an empty
+    ``selection_changed``, which greys every engaged folder button.
+
+    The filter pipeline does the same thing on the same signal. The
+    duplicate stays because some test fixtures have no pipeline.
     """
     registry = _registry(panel)
     grid = getattr(panel, "grid", None)
@@ -1833,12 +1612,8 @@ def _apply_folder_visibility_to_grid(panel) -> None:
         for name, plugin in discovered.items()
         if visibility.get(plugin.source, True) is False
     }
-    # Global Plugins row eye-toggle - when the synthetic row is
-    # marked hidden, every Global Plugin Name drops out of the
-    # visible grid. Global plugins live in ``global_model``,
-    # not ``discovered_plugins`` (the scanner only walks user dirs),
-    # so the loop above misses them; this branch catches them via
-    # the denormalised name set on the registry.
+    # Global plugins live in ``global_model``, not in
+    # ``discovered_plugins``, so the loop above misses them.
     from nsl.constants import GLOBAL_PLUGINS_FOLDER_SENTINEL
     if visibility.get(GLOBAL_PLUGINS_FOLDER_SENTINEL, True) is False:
         hidden_keys.update(
@@ -1866,9 +1641,9 @@ def _on_folder_health(panel, path: str) -> None:
 
 
 def _on_folder_open(panel, path: str) -> None:
-    """Folder-row right-click → reveal that Plugins Folder in the OS file
-    browser. The registry owns path resolution (and skips the Global
-    marker); the wiring layer just forwards the click.
+    """Reveal a Plugins Folder in the OS file browser.
+
+    The registry resolves the path and skips the Global marker.
     """
     registry = _registry(panel)
     hook = getattr(registry, "on_folder_open", None)
@@ -1911,9 +1686,8 @@ def _wire_one_pill(panel, plugin_name: str, pill) -> None:
     pill.open_folder_requested.connect(
         lambda name=plugin_name: _on_pill_open_folder(panel, name)
     )
-    # DORMANT - the diag/Log chip was retired; ``diagnostic_clicked`` is no
-    # longer emitted (the chip is absent from the pill's bottom row). The
-    # connection is harmless and kept so the dormant signal stays wired.
+    # Dormant. The diag chip is gone, so ``diagnostic_clicked`` never
+    # fires. The connection stays in case the chip returns.
     pill.diagnostic_clicked.connect(
         lambda name=plugin_name: _on_pill_diagnostic(panel, name)
     )
@@ -2020,18 +1794,10 @@ def _toggle_plugin(
 
     was_global_active = _is_global_active(registry.state)
 
-    # The panel mutates the active LoadoutFile IN MEMORY only. The edit
-    # persists to disk solely on an explicit Save (``loadout_ops.save``);
-    # a toggle marks the loadout dirty (the ``(*)`` marker + enabled Save
-    # button) but does not touch disk. This preserves the explicit-save
-    # design (dirty marker / Save / Revert / saved-baseline).
-    #
-    # Global active (or first-run, no active pointer): there is no model
-    # to mutate, so the gesture auto-creates the in-memory Custom slot
-    # seeded from the Global view and the toggle lands there - Global itself
-    # is never silently edited. The switch applies FIRST
-    # as its own op so the baseline snapshots the clean seed; the toggle
-    # then reads as dirty and the strip shows ``Custom (*)``.
+    # On Global there is no model to change. The toggle creates the
+    # in-memory Custom slot and lands there, so Global is never edited.
+    # The switch runs first, as its own op. The baseline then holds the
+    # clean seed and the toggle reads as dirty.
     if registry.active_model is None:
         if not was_global_active:
             return
@@ -2049,37 +1815,23 @@ def _toggle_plugin(
         state=registry.state,
     )
 
-    # Push one undo entry on the active stack - multiple toggles in a row
-    # each register as separate undo steps.
     _push_undo_entry(registry, was_global_active, plugin_name, previous, entry, result)
 
-    # The active Loadout is dirty after any toggle; the strip's
-    # ``set_dirty(True)`` slot drives Save's enabled state. No disk write
-    # here - that happens only on an explicit Save (see the in-memory-only
-    # note above).
     registry.apply_op_result(result)
-    # apply_op_result only syncs settings + active_model; it never flips
-    # _is_dirty. Without this explicit mark_clean(False), pill toggles
-    # never produce the (*) suffix on the loadout strip's active row name.
+    # ``apply_op_result`` never flips ``_is_dirty``. Without this call a
+    # toggle produces no ``(*)`` on the strip's active row.
     mark = getattr(registry, "mark_clean", None)
     if mark is not None:
         mark(False)
-    # Every successful pill toggle pushed an undo entry; the toolbar must
-    # reflect that the active stack is no longer empty so the Undo button
-    # becomes clickable. The push side also clears the redo branch
-    # (UndoStack.push), so Redo goes back to disabled regardless of prior
-    # state.
     _sync_undo_toolbar(panel)
 
 
 def _previous_entry(registry, plugin_name: str) -> Optional[PluginEntry]:
-    """Resolve the Plugin's effective entry *before* this toggle.
+    """Resolve the Plugin's effective entry before this toggle.
 
-    Order:
-        1. If the active user Loadout has an explicit entry, use it.
-        2. Else fall back to the Global Loadout (so a Global Plugin's
-           gui_only is computed against the Global value, not a default).
-        3. Else ``None`` - no previous record at all.
+    Active Loadout entry first, then the Global one, then ``None``. The
+    Global step keeps a Global Plugin's ``gui_only`` measured against
+    the Global value rather than a default.
     """
     if registry.active_model is not None:
         entry = registry.active_model.plugins.get(plugin_name)
@@ -2098,27 +1850,19 @@ def _push_undo_entry(
     next_entry: PluginEntry,
     result: loadout_ops.OpResult,
 ) -> None:
-    """Push exactly one undo entry on the *post-op* active Loadout's stack.
+    """Push exactly one undo entry on the post-op active Loadout's stack.
 
-    When the toggle was the first one against Global, the active Loadout is
-    now the newly-created Custom - its stack is fresh, so the entry lands
-    there. When the toggle was against an existing user Loadout, it lands
-    on that Loadout's stack.
-
-    A single-pill toggle pushes one undo entry. The undo stack is
-    per-Loadout; the entry payload is opaque to the stack module (the
-    registry owns the replay).
+    A first toggle against Global lands on the fresh Custom stack. Any
+    other toggle lands on the active Loadout's own stack. The payload is
+    opaque to the stack, because the registry owns the replay.
     """
     if not isinstance(registry.undo_stacks, UndoStackRegistry):
         return
     if result.model is None:
-        # Global is now active (e.g. delete-of-active fallback). No stack
-        # to push to; undo for file-level ops is out of scope anyway.
+        # Global is active again, so there is no stack to push to.
         return
-    # ``result.model`` may be the new LoadoutModel (no ``.name``) or the
-    # legacy LoadoutFile (``.name``). The undo stack keys by stem; reach
-    # for ``.name`` defensively and fall back to the dispatcher's active
-    # pointer when the new shape is in play.
+    # A LoadoutModel has no ``.name``, a LoadoutFile does. The stack keys
+    # by stem, so fall back to the dispatcher pointer.
     stem = getattr(result.model, "name", None) or registry.state.active
     stack = registry.undo_stacks.for_loadout(stem)
     stack.push(
@@ -2135,10 +1879,7 @@ def _push_undo_entry(
 def _on_pill_info(panel, plugin_name: str) -> None:
     """Pill info button - route to the side panel's Info tab.
 
-    Clicking the info button loads the plugin's README into the Info tab
-    AND activates that tab. The actual content loading is the registry's
-    responsibility (it knows where the README lives); the wiring layer
-    just forwards the click.
+    The registry loads the README, because it knows where it lives.
     """
     registry = _registry(panel)
     hook = getattr(registry, "on_pill_info", None)
@@ -2209,11 +1950,9 @@ def _handle_op_result(
         registry.on_blocked(result.blocked)
         return
 
-    # Case-B defence: no op may leave the active pointer on the hidden
-    # user-land ``Global_Loadout`` (rename / duplicate / import routes
-    # could produce it). Normalise to the read-only Global view and
-    # persist so boot converges. The Save As staging path never reaches
-    # here (it is intercepted in ``_on_save_as``).
+    # No op may leave the active pointer on the hidden
+    # ``Global_Loadout``. Normalise to the read-only Global view and
+    # persist, so boot agrees.
     if (
         result.state is not None
         and result.state.active == GLOBAL_LOADOUT_DIR_NAME
@@ -2230,17 +1969,13 @@ def _handle_op_result(
             path=result.path, model=None, state=normalized
         )
 
-    # Derive the post-op stem from the result's folder path (or the
-    # dispatcher state when the op didn't target a single folder).
     post_stem = result.state.active if result.state else ""
     if result.path is not None:
         post_stem = result.path.name
 
     if old_stem is not None and result.path is not None:
-        # Rename: the on-disk folder has a new stem; the in-memory
-        # ``name`` field is deliberately not rewritten (see
-        # ``loadout_ops.rename`` - preserves any user-customised display
-        # name). The undo stack follows the renamed folder.
+        # ``loadout_ops.rename`` leaves the in-memory ``name`` alone, so
+        # a custom display name survives. Only the stack follows.
         new_stem = result.path.name
         if isinstance(registry.undo_stacks, UndoStackRegistry):
             registry.undo_stacks.rename(old_stem, new_stem)
