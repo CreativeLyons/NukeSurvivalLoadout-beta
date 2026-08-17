@@ -1,0 +1,4 @@
+# Keep repo-plumbing files out of `git archive` release zips. The
+# archive is the end-user install payload, not a checkout.
+.gitignore export-ignore
+.gitattributes export-ignore
