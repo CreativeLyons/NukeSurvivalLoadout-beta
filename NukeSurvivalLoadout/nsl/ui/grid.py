@@ -1,44 +1,15 @@
-"""Plugins grid widget - NSL's cell+pill rendering surface.
+"""Plugins grid widget - the cell and pill rendering surface.
 
-Public API:
-    - :class:`PillProtocol` - duck-typed pill (so callers don't need to
-      import :mod:`nsl.ui.pill`).
-    - :class:`PillFactory` - callable returning a ``QWidget`` for a key.
-    - :func:`compute_columns` - pure-Python: how many columns at width *w*.
-    - :func:`marquee_hits` - pure-Python: which cell indices overlap a
-      marquee rect (any-overlap, NOT containment).
-    - :func:`toggle_selection` - pure-Python: ctrl-click toggle semantics.
-    - :class:`PluginsGrid` - the custom ``QScrollArea`` + viewport
-      ``QWidget`` with cell+pill structure, dynamic column reflow,
-      marquee drag bounded to the grid region, and ctrl-click toggling.
+Each grid slot is a ``_Cell`` ``QWidget`` holding one pill widget. The
+cell paints the selection signal and the diff wash. The pill paints its
+own body tint, border and status icon.
 
-Signals emitted by ``PluginsGrid``:
-    - ``selection_changed(list)`` - emitted whenever the selection set
-      changes. Payload is a list of the currently-selected pill keys
-      (strings), in arbitrary order. The grid keeps an internal selection
-      set only to drive cell-paint; it is a signal source only and does
-      not own the canonical selection model.
+``selection_changed(list)`` carries the selected pill keys. The grid
+keeps a selection set only to drive cell paint. The canonical model
+lives elsewhere.
 
-Cross-cutting contracts:
-    - Qt imported only via :mod:`nsl.compat` - never ``import PySide2`` /
-      ``import PySide6`` directly.
-    - **Cell + pill split**: each grid slot is a ``_Cell`` ``QWidget`` whose
-      paint paints the yellow-orange selection background. The pill widget
-      is a child of the cell - it owns its own body tint, border, and
-      status icon. The cell never paints over the pill.
-    - **Marquee bounded** to the grid viewport rect. Drags that start in
-      empty space or on a cell launch a marquee; drag attempts to extend
-      past the viewport are clipped at the viewport edge.
-    - **Any-overlap capture** (NOT containment).
-    - No ``import nuke``. No edits to ``nsl/ui/__init__.py``.
-
-Pill sizing:
-    - Pill min/max width: ``PILL_MIN_WIDTH = 241`` and
-      ``PILL_MAX_WIDTH = 380``. Tunable via
-      ``PluginsGrid.set_pill_size_hints(min, max)``.
-    - Pill widget class - :mod:`nsl.ui.pill`. We define a
-      ``PillProtocol`` duck-type and accept any callable factory so this
-      file does not hard-depend on the pill module.
+Marquee capture is any-overlap, not containment, and the drag is clipped
+to the viewport rect. Qt comes from :mod:`nsl.compat` only.
 """
 
 from __future__ import annotations
@@ -57,166 +28,96 @@ QtWidgets = compat.QtWidgets
 # Layout defaults
 # ---------------------------------------------------------------------------
 
-#: Hard cap on column count. The grid reflows freely based on viewport
-#: width - pills flow book-order (left to right, top to bottom) and pack
-#: as many columns as fit. The cap is a sanity ceiling rather than a
-#: design constraint.
+#: A ceiling only. The grid packs as many columns as fit the viewport.
 MAX_COLUMNS = 16
 
-#: Pill minimum visual width in px. Below this, the column count drops.
-#: Kept in sync with ``nsl.ui.pill._MIN_W`` - if either changes, both must
-#: change together or the grid will clip pills at the right column edge.
-#: V3.5 shadow halo bumped 12 → 15: ``_MIN_W = 211 + 2 * 15 = 241``.
+#: Must match ``nsl.ui.pill._MIN_W`` (211 + 2 * 15) or the grid clips
+#: pills at the right column edge. Below it the column count drops.
 PILL_MIN_WIDTH = 241
 
-#: Pill maximum visual width in px. Above this, extra space becomes margin.
-#: 304 = 380 × 0.8 - caps the visible pill width 20% tighter so a wide
-#: panel doesn't grow the pill body to an over-aerated size. The remaining
-#: viewport width becomes outer margin.
+#: Passed to :func:`cell_widths`, which ignores it. No part of the
+#: layout reads this value.
 PILL_MAX_WIDTH = 380
 
-#: Padding inside each cell around its pill (the cell-vs-pill breathing
-#: room). V3.3 zeroed both axes - cells touch edge-to-edge, and the only space
-#: between adjacent pill bodies is the pill widget's own (now halved)
-#: shadow halo. The marquee drag-start zone is now ``_SHADOW_MARGIN``
-#: per side instead of ``_SHADOW_MARGIN + CELL_PADDING``.
+#: Both axes are 0. The only gap between pill bodies is the pill's own
+#: shadow margin.
 CELL_PADDING = 0
 CELL_PADDING_V = 0
 
-#: Outer horizontal margin around the grid block inside the viewport.
-#: V3.3 zeroed out (3 → 0) - leftmost / rightmost pill columns now sit
-#: flush against the grid viewport's left + right edges so the SectionBox
-#: bounding line is the only visible chrome between the pill column and
-#: the panel chrome outside.
+#: 0, so the first and last pill columns sit flush with the viewport.
 GRID_MARGIN = 0
 
-#: Outer vertical margin around the grid block - also zeroed (3 → 0)
-#: on the same V3.3 call. Top + bottom edge sit flush against the
-#: SectionBox bounding line.
+#: 0, so the top and bottom rows sit flush with the SectionBox line.
 GRID_MARGIN_V = 0
 
-#: Vertical pixel height of each cell (cell padding top + pill body + cell
-#: padding bottom). Must be ``>= nsl.ui.pill._MIN_H + 2 * CELL_PADDING_V`` or
-#: the cell will squeeze the pill below its minimum height and clip the
-#: bottom row of paint geometry (status row / GUI button) on every render.
-#:
-#: V3.5 shadow halo: pill ``_MIN_H = 70 + 2 * 15 = 100``;
-#: ``100 + 2 * CELL_PADDING_V(0) = 100``.
+#: Must be at least ``nsl.ui.pill._MIN_H + 2 * CELL_PADDING_V``, which is
+#: 70 + 2 * 15. Less than that clips the pill's bottom row of paint.
 CELL_HEIGHT = 100
 
-#: Vertical pixel height of one group-divider row (the **gutter band**
-#: that separates buckets when the sort dropdown is set to a grouping
-#: mode). The gutter
-#: holds the bucket label + hairline; its background is a hair below
-#: ``GRID_BG_COLOUR`` so it reads as a quiet gap rather than a dark slab.
-#:
-#: 18 px band in ``#252525``: a tight gutter with subtle contrast that sits
-#: clear of the painted hairlines.
+#: The gutter band between buckets in a grouping sort mode. It holds the
+#: bucket label and a hairline, just below ``GRID_BG_COLOUR``.
 GROUP_DIVIDER_HEIGHT = 18
 
 
 # ---------------------------------------------------------------------------
 # Selection-visual colours
 # ---------------------------------------------------------------------------
-# Locked vocabulary (per the grid-toolbar pass, row #4): selection = orange
-# ``#ee9626`` 2 px BORDER ONLY around the pill. No body wash on the cell - the
-# pill body stays free for the pending-diff colour (green/red) painted by the
-# pill widget itself. The cell paints the border just outside the pill rect
-# so the line reads as "this pill is selected" while leaving any pill body
-# tint intact.
-#
-# The marquee transient hover uses the same colour at a thinner 1 px width
-# (and lower alpha) so cells lighting up as the marquee sweeps over them
-# read as distinct from confirmed selections.
 
-#: Canonical Nuke-accent orange (single source of truth in ``_theme.py``).
+#: The single source is ``_theme.py``.
 NUKE_SELECTION_RGB = _theme.NUKE_ORANGE_RGB
 
-#: Persistent selection border width (px).
 SELECTION_BORDER_WIDTH = 3
 
-#: Inflation (px) of the pill rect when painting the selection halo.
-#: Set to ``SELECTION_BORDER_WIDTH // 2`` so the centered stroke's inner
-#: edge sits **flush** with the pill body edge - half the stroke draws
-#: into the shadow-margin area (visible), half draws into the body area
-#: (covered by the pill's own paint). Earlier this was ``2`` while the
-#: width was also ``2``, which left a 1-px gap between the pill edge
-#: and the ring; the new pairing closes that gap so the ring reads as
-#: hugging the pill rather than floating around it.
+#: Half the stroke width, so the centered stroke's inner edge sits flush
+#: with the pill body edge.
 SELECTION_HALO_INSET = SELECTION_BORDER_WIDTH // 2
 
-#: Marquee transient hover border width (px).
+#: Unused. Marquee hover paints a cell wash and no ring.
 MARQUEE_HOVER_WIDTH = 1
 
-#: Marquee transient hover alpha (0-255) - lower than the confirmed selection
-#: so the two states are visually distinct.
+#: Unused, with the border it belongs to.
 MARQUEE_HOVER_ALPHA = 180
 
-#: Selection border alpha (0-255) - solid.
 SELECTION_BORDER_ALPHA = 255
 
-#: Confirmed-selection body tint alpha (0-255). A quiet orange wash on
-#: the cell rect that pairs with the halo so the cell itself reads as
-#: "highlighted" without competing with the pill body chrome.
+#: Quiet, so the wash does not compete with the pill body chrome.
 SELECTED_CELL_TINT_ALPHA = 32
 
-#: Marquee-hover body tint alpha (0-255). Fainter than the confirmed
-#: selection - the transient state should read as "marquee is passing
-#: over you" rather than "you're selected".
+#: Fainter than a confirmed selection, so the two states read apart.
 MARQUEE_HOVER_TINT_ALPHA = 22
 
-#: Marquee rubber-band fill alpha (0-255). Translucent so cells underneath
-#: stay visible while the drag is in progress.
+#: Translucent, so cells under the drag stay visible.
 MARQUEE_FILL_ALPHA = 50
 
-#: Marquee rubber-band outline alpha (0-255). Solid edge.
 MARQUEE_OUTLINE_ALPHA = 220
 
-#: 1 px hairline drawn between adjacent cells. Lighter than the recessed
-#: grid background (#303030) so the dividers read as engraved channels
-#: against a slightly darker plane.
+#: Lighter than ``GRID_BG_COLOUR``, so the 1 px dividers read as
+#: engraved channels.
 CELL_DIVIDER_COLOUR = (74, 74, 74)  # #4a4a4a
 
-#: Background colour of the pill grid viewport - recessed below the panel
-#: body (`#393939`) and a hair below the search field (`#303030`). The
-#: grid reads as a recessed channel that holds the pills; the dividers
-#: paint lighter against this darker plane.
+#: Recessed below the panel body (`#393939`) and a hair below the search
+#: field (`#303030`).
 GRID_BG_COLOUR = (45, 45, 45)  # #2d2d2d
 
-#: Cell-background wash for pending-restart diff.
-#: The pill border + glow already signal "will load on restart" (lime)
-#: and "will unload on restart" (red); these RGBA washes paint the
-#: same signal at the cell-padding level so the row reads green / red
-#: at a glance without competing with the pill body. Alpha is
-#: intentionally low - the cell's perceived luminance stays close to
-#: ``GRID_BG_COLOUR`` and the wash is a subtle direction-of-change
-#: cue, not a heavy fill.
-#
-# The load alpha (18) sits a touch below the unload alpha (22) because
-# the broader lime channel reads heavier than red at equal alpha; the
-# offset balances the two washes to the same perceived strength.
+#: Cell wash for the pending-restart diff, matching the pill border and
+#: glow. Load sits below unload in alpha because lime reads heavier than
+#: red.
 CELL_DIFF_BG_LOAD_RGBA = (80, 180, 80, 18)
 CELL_DIFF_BG_UNLOAD_RGBA = (200, 80, 80, 22)
 
-#: Cell wash for a GUI-only OFF->ON change. GUI-only is NOT a load/unload
-#: change (still loads in this GUI session; skipped only on the render
-#: farm), so it gets a purple wash rather than the green/red load washes.
-#: The load wash takes precedence: this purple paints only when the cell
-#: has no enable/disable change.
-#:
-#: A saturated violet (150,90,214) at alpha 32: saturation high enough to
-#: read clearly as purple (rather than a plain highlight) while the low
-#: alpha keeps it a subtle row hint, not a slab.
+#: Cell wash for a GUI-only OFF to ON change. Purple, because the plugin
+#: still loads in this GUI session and is skipped only on the farm. The
+#: load wash wins when a cell has both.
 CELL_DIFF_BG_GUI_ON_RGBA = (150, 90, 214, 32)
 
 
 # ---------------------------------------------------------------------------
 # Empty-state placeholder
 # ---------------------------------------------------------------------------
-# Shown when the grid has no keys to render - e.g. a Loadout with zero
-# enabled plugins, or every plugin filtered out by Search + Tag. Wording is
-# deliberately neutral; the row #8 first-run "no folders yet" prompt is a
-# different surface and lives in ``nsl.ui.empty_state``.
+
+# Shown when the grid has no keys, from an empty Loadout or from Search
+# and Tag filtering everything out. The first-run "no folders yet" prompt
+# is a different surface, in ``nsl.ui.empty_state``.
 
 EMPTY_PLACEHOLDER_TEXT = "No plugins to show."
 EMPTY_PLACEHOLDER_COLOUR = "#7a7a7a"
@@ -228,12 +129,9 @@ EMPTY_PLACEHOLDER_COLOUR = "#7a7a7a"
 
 
 class PillProtocol:
-    """Minimal duck-typed pill interface this grid relies on.
+    """Minimal duck-typed pill interface. Any ``QWidget`` satisfies it.
 
-    The real ``nsl.ui.pill.PluginPill`` satisfies this
-    by virtue of being a ``QWidget`` subclass - any ``QWidget`` is enough.
-    Declared here so this module is self-contained and does not hard-depend
-    on ``nsl.ui.pill``.
+    Declared here so this module does not hard-depend on ``nsl.ui.pill``.
     """
 
     def setParent(self, parent):  # pragma: no cover - QWidget interface
@@ -246,7 +144,7 @@ class PillProtocol:
         ...
 
 
-#: Type alias: callable that returns a fresh ``QWidget`` for the given key.
+#: Returns a fresh ``QWidget`` on every call, never a cached one.
 PillFactory = Callable[[str], "QtWidgets.QWidget"]
 
 
@@ -264,12 +162,8 @@ def compute_columns(
 ) -> int:
     """Return how many columns fit in *viewport_width* px.
 
-    A column requires ``pill_min_width + 2*cell_padding`` of horizontal
-    space; total horizontal chrome is ``2*grid_margin``. Result is clamped
-    to ``[1, max_columns]``.
-
-    Pure function - no Qt dependency, so reflow can be computed without
-    a ``QApplication``.
+    A column needs ``pill_min_width + 2*cell_padding``. The result is
+    clamped to ``[1, max_columns]``.
     """
     if viewport_width <= 0:
         return 1
@@ -288,17 +182,9 @@ def cell_widths(
     cell_padding: int = CELL_PADDING,
     grid_margin: int = GRID_MARGIN,
 ) -> int:
-    """Return each cell's width in px given the chosen *columns*.
+    """Return each cell's width in px for the chosen *columns*.
 
-    Cells split the usable viewport width **evenly** so the grid resizes
-    with the window - the column count is what determines pill density,
-    not pill size. Pills inside each cell are capped at ``pill_max_width``
-    and centred within their cell so the visible result reads as a
-    regularly-spaced grid (even gaps between every column) instead of a
-    left-pinned block with leftover margin on one side.
-
-    ``pill_max_width`` no longer caps the cell - only the pill inside.
-    See :meth:`PluginsGrid._relayout` for the cell-vs-pill centring.
+    Cells split the usable width evenly. ``pill_max_width`` is unused.
     """
     if columns <= 0:
         return 0
@@ -322,11 +208,7 @@ def cell_rect(
 ) -> Tuple[int, int, int, int]:
     """Return ``(x, y, w, h)`` for cell *index* in a *columns*-wide grid.
 
-    Top-left origin; cells flow left-to-right, top-to-bottom.
-    Horizontal margin is ``grid_margin``; vertical margin is
-    ``grid_margin_v`` - the two axes can flex independently so the grid
-    can tighten its top/bottom edge without affecting its left/right
-    spacing.
+    Top-left origin. Cells flow left to right, then top to bottom.
     """
     if columns <= 0:
         columns = 1
@@ -343,14 +225,11 @@ def grid_content_height(
     grid_margin: int = GRID_MARGIN,  # retained for backwards-compat callers
     grid_margin_v: int = GRID_MARGIN_V,
 ) -> int:
-    """Total content height (px) for *n_pills* in *columns*-wide grid.
+    """Total content height in px for *n_pills* in a *columns*-wide grid.
 
-    The vertical extent depends on ``grid_margin_v`` (top + bottom
-    outer margin) and ``cell_h``; ``grid_margin`` is retained in the
-    signature so older callers that pass it as a kwarg don't break,
-    but it doesn't enter the vertical math.
+    ``grid_margin`` is ignored. It stays for older keyword callers.
     """
-    del grid_margin  # horizontal; vertical math uses grid_margin_v only
+    del grid_margin
     if n_pills <= 0:
         return 2 * grid_margin_v
     if columns <= 0:
@@ -374,47 +253,18 @@ def layout_with_dividers(
     List[Tuple[str, int, int, int, int]],
     int,
 ]:
-    """Place cells + group-divider rows into the viewport.
+    """Place cells and group-divider rows into the viewport.
 
-    Walks *group_labels* in order, treating each transition as a
-    "finish the current row, drop a divider row, start the next bucket
-    on a fresh row" event. Pure function - no Qt; the caller applies
-    the returned geometries via ``setGeometry``.
+    *group_labels* holds one entry per pill key, in render order. A
+    change between consecutive non-``None`` labels finishes the current
+    row, drops a divider row, and starts the next bucket at column 0. A
+    ``None`` joins the previous bucket, and a leading run emits nothing.
 
-    Args:
-        group_labels: One entry per pill key, in render order. ``None``
-            entries collapse into the same bucket (no transition); a
-            non-``None`` entry that differs from the previous non-``None``
-            entry triggers a divider row above the pill. A leading
-            ``None`` run never emits a divider - the grid does not show
-            a redundant divider above its very first pill.
-        columns: Active column count (from :func:`compute_columns`).
-        cell_w: Cell width in px (from :func:`cell_widths`).
-        viewport_w: Inner viewport width in px (drives divider widget
-            length; dividers span the full viewport minus margins).
-        cell_h: Cell height in px. Defaults to :data:`CELL_HEIGHT`.
-        divider_h: Divider row height in px. Defaults to
-            :data:`GROUP_DIVIDER_HEIGHT`.
-        grid_margin: Outer horizontal margin (left + right).
-        grid_margin_v: Outer vertical margin (top + bottom).
-
-    Returns:
-        ``(cell_rects, divider_rects, content_height)`` where:
-
-        * ``cell_rects[i]`` - ``(x, y, w, h)`` for pill index *i* in the
-          input order. Always aligned with the input list; consumers can
-          ``zip(cells, cell_rects)`` safely.
-        * ``divider_rects`` - list of ``(label, x, y, w, h)`` tuples for
-          every emitted divider, in document order. Empty list when
-          ``group_labels`` has no transitions (e.g. all-``None`` for
-          alphabetical sort modes).
-        * ``content_height`` - total viewport height in px, including
-          both pill rows and divider rows plus top/bottom margins.
-
-    When ``group_labels`` is all-``None`` or empty, the output cell
-    geometry is byte-identical to a uniform :func:`cell_rect` layout -
-    callers that don't activate grouping get the existing behaviour for
-    free.
+    Returns ``(cell_rects, divider_rects, content_height)``.
+    ``cell_rects`` stays aligned with *group_labels*, so ``zip`` is safe.
+    ``divider_rects`` holds ``(label, x, y, w, h)`` in document order,
+    and is empty when no label changes. All-``None`` input gives the same
+    cell geometry as a uniform :func:`cell_rect` layout.
     """
     if columns <= 0:
         columns = 1
@@ -425,29 +275,15 @@ def layout_with_dividers(
     if n == 0:
         return ([], [], 2 * grid_margin_v)
 
-    # Row counter walks pill rows only; divider vertical offset is
-    # picked up separately via ``len(divider_rects) * divider_h``.
+    # ``row`` counts pill rows only. The divider offset comes from
+    # ``len(divider_rects) * divider_h``.
     row = 0
     col = 0
     last_label: Optional[str] = None
     divider_w = max(0, viewport_w - 2 * grid_margin)
 
     for label in group_labels:
-        # Group transition: emit a divider strip above the first pill
-        # of the new bucket. The very first non-``None`` label also
-        # counts as a transition - every bucket gets a leading header.
-        # The user sees ``ON ────`` above the first On pill,
-        # ``OFF ────`` between buckets - every section is visibly
-        # labelled.
-        #
-        # ``None`` labels collapse into the previous bucket (no
-        # divider), so an all-``None`` input (alphabetical sort
-        # modes) renders zero dividers and an all-``None`` prefix
-        # never spuriously claims that the first non-``None`` label
-        # is its OWN bucket header above the prefix pills.
         if label is not None and label != last_label:
-            # Finish partial row before the divider so the new
-            # bucket starts on a fresh row at column 0.
             if last_label is not None and col != 0:
                 row += 1
                 col = 0
@@ -461,9 +297,8 @@ def layout_with_dividers(
             )
             last_label = label
 
-        # Cell y picks up the current divider count (this includes the
-        # divider just emitted above, if any, so the first pill of a
-        # new bucket sits beneath its divider strip).
+        # The divider count already includes the one emitted above. The
+        # first pill of a bucket then lands under its strip.
         cell_y = (
             grid_margin_v
             + row * cell_h
@@ -477,7 +312,6 @@ def layout_with_dividers(
             col = 0
             row += 1
 
-    # Final row counter: one past the last placed pill row.
     final_rows = row + (1 if col != 0 else 0)
     content_height = (
         grid_margin_v
@@ -491,12 +325,9 @@ def layout_with_dividers(
 def _y_inside_any(y: int, ranges: List[Tuple[int, int]]) -> bool:
     """Return ``True`` if *y* falls strictly inside any ``(y_top, y_bottom)``.
 
-    "Strictly inside" means ``y_top < y < y_bottom`` - equality at
-    either boundary doesn't count, so a hairline at the top or bottom
-    edge of a gutter (which abuts a pill row) still paints. Used by
-    :meth:`PluginsGrid._paint_cell_dividers` to skip painting
-    horizontal hairlines that would otherwise stripe through the
-    middle of a gutter band.
+    Strict, so a hairline exactly at a gutter edge still paints.
+    :meth:`PluginsGrid._paint_cell_dividers` uses it to skip hairlines
+    inside a gutter band.
     """
     for y_top, y_bottom in ranges:
         if y_top < y < y_bottom:
@@ -509,8 +340,7 @@ def _rects_overlap(
 ) -> bool:
     """Return True if two ``(x, y, w, h)`` rects share any pixel.
 
-    Edge-touching counts as overlap (the "any overlap, not full
-    containment" rule).
+    Edge-touching counts as overlap.
     """
     ax, ay, aw, ah = ra
     bx, by, bw, bh = rb
@@ -525,13 +355,9 @@ def marquee_hits(
     marquee: Tuple[int, int, int, int],
     cell_rects: Sequence[Tuple[int, int, int, int]],
 ) -> List[int]:
-    """Return cell indices whose rect overlaps *marquee* (any overlap).
-
-    Pure function implementing the any-overlap rule, so the captured set
-    can be computed without instantiating any widgets.
-    """
+    """Return cell indices whose rect overlaps *marquee*. Any overlap counts."""
     mx, my, mw, mh = marquee
-    # Normalise marquee to top-left origin with positive size.
+    # Normalise to a top-left origin with a positive size.
     if mw < 0:
         mx, mw = mx + mw, -mw
     if mh < 0:
@@ -547,8 +373,6 @@ def toggle_selection(
 
     * ``additive=False`` (plain click): replace selection with ``{key}``.
     * ``additive=True``  (ctrl/cmd-click): toggle *key*'s membership.
-
-    Pure helper so the grid widget's click handlers stay shallow.
     """
     s = set(current)
     if additive:
@@ -567,47 +391,31 @@ def toggle_selection(
 
 
 class _Cell(QtWidgets.QWidget):
-    """One grid slot. Hosts a pill; paints the selection halo around it.
+    """One grid slot. Hosts a pill and paints the selection signal.
 
-    The cell is a **pure positioning slot** for the pill body - it never
-    fills its own rect. Selection signal is a 2 px orange ring drawn just
-    outside the pill rect when ``_selected`` is True (1 px lower-alpha ring
-    when the marquee is sweeping over it). The pill body itself stays free
-    for whatever tint the pill widget paints (pending-add / pending-remove
-    diff colour) - the locked vocabulary from the grid-toolbar pass.
+    A selected cell gets an orange ring just outside the pill rect and a
+    low-alpha orange wash. Marquee hover gets the wash only. The pill
+    body stays free for the pending-diff tint the pill paints.
 
-    The cell owns the paint (rather than the pill) for two reasons:
-      * It works for any pill widget plugged into the grid via
-        ``PillFactory`` - the grid doesn't have to duck-type into the pill
-        to forward selection state.
-      * The pill rect is what the cell already knows from layout; painting
-        at that rect keeps the selection halo geometrically locked to the
-        pill regardless of cell padding or future anatomy changes.
+    The cell owns this paint, not the pill, so any ``PillFactory`` widget
+    works and the ring stays locked to the pill rect.
     """
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
         self._selected = False
         self._marquee_hover = False
-        # Pending-restart diff tint - set by the panel's refresh loop
-        # based on the matching pill's ``_pending_border_color``. ``None``
-        # paints nothing (cell relies on ``GRID_BG_COLOUR`` showing
-        # through). This is a second paint surface for the diff signal
-        # alongside the pill border + glow so the direction of change
-        # reads at the row level too.
+        # Pending-restart diff wash, set by the panel refresh loop.
+        # ``None`` paints nothing and ``GRID_BG_COLOUR`` shows through.
         self._diff_tint: Optional[QtGui.QColor] = None
-        # Pill rect the cell will paint the selection halo around. Set by
-        # the grid during ``_relayout``; defaults to empty so an unsized
-        # cell paints nothing even if ``_selected`` is True.
+        # Where the cell paints the selection ring. The grid sets it in
+        # ``_relayout``. Empty means paint nothing.
         self._pill_rect = QtCore.QRect()
-        # Back-reference to the owning ``PluginsGrid`` so the cell can
-        # forward mouse events to the grid's selection/marquee handlers.
-        # Set by the grid right after construction; ``None`` means
-        # "forwarding disabled" so the cell falls back to default behavior
-        # when instantiated standalone.
+        # Set by the grid right after construction. ``None`` turns mouse
+        # forwarding off, so a standalone cell keeps Qt's behaviour.
         self._grid_ref: Optional["PluginsGrid"] = None
         self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, False)
-        # Cells don't accept focus - pills (and the grid's marquee) do.
+        # Cells take no focus. Pills and the marquee do.
         self.setFocusPolicy(QtCore.Qt.NoFocus)
 
     # -- selection / marquee API --
@@ -638,10 +446,7 @@ class _Cell(QtWidgets.QWidget):
     def set_diff_tint(self, color: Optional[QtGui.QColor]) -> None:
         """Set the cell's pending-restart background wash.
 
-        Mirrors the matching pill's ``_pending_border_color`` signal at
-        the cell level - lime wash for "would load on restart," red
-        wash for "would unload." ``None`` clears the wash and the cell
-        falls back to ``GRID_BG_COLOUR`` showing through.
+        Green for load on restart, red for unload. ``None`` clears it.
         """
         if self._diff_tint is None and color is None:
             return
@@ -655,11 +460,8 @@ class _Cell(QtWidgets.QWidget):
         self.update()
 
     # -- mouse forwarding --
-    # Clicks that land on the bare cell (padding zone between the pill body
-    # and the cell edge) belong to the marquee surface, not the cell.
-    # Forward press / move / release to the owning grid with the position
-    # translated into viewport coordinates. Pills are child widgets at
-    # their own geometry and still receive their own clicks directly.
+    # A click on the bare cell belongs to the marquee. Forward it to the
+    # grid in viewport coordinates. Pills keep their own clicks.
 
     def mousePressEvent(self, event):  # pragma: no cover - GUI path
         if (
@@ -703,22 +505,16 @@ class _Cell(QtWidgets.QWidget):
         try:
             painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
 
-            # 1. Pending-restart diff wash - bottom layer. Paints the
-            #    full cell rect (padding zone around the pill); the pill
-            #    body paints on top so its own tint stays untouched. The
-            #    selection orange (below) blends on top of this, so a
-            #    selected pending-load cell reads as orange-over-green.
+            # 1. Diff wash, bottom layer, over the full cell rect. The
+            #    pill body paints on top, so its own tint survives.
             if has_diff:
                 painter.fillRect(self.rect(), self._diff_tint)
 
             if needs_select_paint:
                 r, g, b = NUKE_SELECTION_RGB
 
-                # 2. Slight orange body tint on the cell rect - fills the
-                #    whole cell (including the padding around the pill) so
-                #    the visible "highlighted" zone matches the dividers.
-                #    The pill body paints on top so its own tint stays
-                #    untouched.
+                # 2. Orange wash over the whole cell, so the highlighted
+                #    zone reaches the dividers.
                 tint_alpha = (
                     SELECTED_CELL_TINT_ALPHA
                     if self._selected
@@ -726,9 +522,8 @@ class _Cell(QtWidgets.QWidget):
                 )
                 painter.fillRect(self.rect(), QtGui.QColor(r, g, b, tint_alpha))
 
-            # 3. Halo around the pill body - confirmed selection only.
-            #    Marquee-hover reads via the body tint alone, so the halo
-            #    is reserved for "this is in your committed selection".
+            # 3. Ring around the pill body. Confirmed selection only.
+            #    Marquee hover reads from the wash alone.
             if self._selected and not self._pill_rect.isEmpty():
                 r, g, b = NUKE_SELECTION_RGB
                 painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
@@ -739,23 +534,16 @@ class _Cell(QtWidgets.QWidget):
                 pen.setCosmetic(True)
                 painter.setPen(pen)
                 painter.setBrush(QtCore.Qt.NoBrush)
-                # Inflate so the line sits **outside** the pill body - the
-                # pill widget paints on top of the cell, so any halo pixels
-                # inside the pill rect would be obscured. Rounded radius
-                # matches ``nsl.ui.pill._BORDER_RADIUS = 16`` (hard-coded
-                # to avoid importing pill.py; if pill radius changes, this
-                # must too).
+                # Inflate so the line sits outside the pill body. The
+                # pill paints on top and would hide it otherwise.
                 halo = self._pill_rect.adjusted(
                     -SELECTION_HALO_INSET,
                     -SELECTION_HALO_INSET,
                     SELECTION_HALO_INSET,
                     SELECTION_HALO_INSET,
                 )
-                # Pull the radius from pill.py so the halo always
-                # matches the pill body's rounded corner - the previous
-                # hardcoded ``16`` was a stale copy that didn't track
-                # ``NSL_PILL_RADIUS`` env overrides or any future code
-                # edit to the pill's corner radius.
+                # Read the radius from pill.py so the ring follows the
+                # pill corner, ``NSL_PILL_RADIUS`` overrides included.
                 from nsl.ui.pill import _BORDER_RADIUS as _PILL_RADIUS
                 radius = _PILL_RADIUS + SELECTION_HALO_INSET
                 painter.drawRoundedRect(halo, radius, radius)
@@ -766,26 +554,15 @@ class _Cell(QtWidgets.QWidget):
 # ---------------------------------------------------------------------------
 # Group divider - thin label-plus-hairline strip between sort buckets
 # ---------------------------------------------------------------------------
-#
-# The strip is a thin label-plus-hairline band: the label is a small
-# uppercase chip on the left followed by a 1 px hairline that stretches
-# to the right edge of the grid.
-#
-# Used by :class:`PluginsGrid` when ``set_group_labels`` is called with
-# any non-``None`` label. Throwaway widgets - recreated on each
-# ``_relayout`` because their position depends on the current viewport
-# width and pill row arrangement.
+
+# :class:`PluginsGrid` rebuilds these widgets on every ``_relayout``.
+# Their position depends on the viewport width and the row arrangement.
 
 _GROUP_DIVIDER_QSS = (
-    # The divider strip is a **gutter band**, not a transparent strip
-    # overlaid on the recessed grid background. The
-    # gutter colour (``#252525``) sits one value-channel step below the
-    # grid background (``GRID_BG_COLOUR`` = ``#2d2d2d``) so the strip
-    # reads as a subtle dark gap in the grid surface - quiet but
-    # clearly distinct. The horizontal cell-hairlines the grid painter
-    # draws are made gutter-aware (see
-    # ``PluginsGrid._paint_cell_dividers``) so they align with the
-    # shifted pill rows but never paint inside the gutter zone.
+    # The strip is a gutter band, not a transparent overlay. ``#252525``
+    # sits one step below ``GRID_BG_COLOUR`` (``#2d2d2d``), so it reads
+    # as a quiet dark gap. ``PluginsGrid._paint_cell_dividers`` keeps its
+    # hairlines out of this zone.
     "QFrame#nsl_plugins_grid_group_divider {"
     "    background-color: #252525;"
     "    border: none;"
@@ -799,8 +576,6 @@ _GROUP_DIVIDER_QSS = (
     "    background: transparent;"
     "}"
     "QFrame#nsl_plugins_grid_group_divider_line {"
-    # 2 px line at #6a6a6a - clear against the gutter, doesn't compete
-    # with the bolder label.
     "    background-color: #6a6a6a;"
     "    border: none;"
     "    min-height: 2px; max-height: 2px;"
@@ -811,9 +586,8 @@ _GROUP_DIVIDER_QSS = (
 class _GroupDivider(QtWidgets.QFrame):
     """Thin horizontal divider with a small uppercase label on the left.
 
-    Spans the full grid width minus the outer margins. Used between
-    sort buckets when :meth:`PluginsGrid.set_group_labels` activates
-    grouping for a non-alphabetical sort mode.
+    Spans the grid width minus the outer margins. Emitted between sort
+    buckets when :meth:`PluginsGrid.set_group_labels` turns on grouping.
     """
 
     def __init__(
@@ -823,15 +597,13 @@ class _GroupDivider(QtWidgets.QFrame):
         self.setObjectName("nsl_plugins_grid_group_divider")
         self.setStyleSheet(_GROUP_DIVIDER_QSS)
         layout = QtWidgets.QHBoxLayout(self)
-        # 4 px top + 2 px bottom in the 18 px gutter band leaves a
-        # 12 px content area - enough for the 9 px label baseline + the
-        # 2 px line. Tight, centred, no wasted vertical room.
+        # 4 top and 2 bottom in the 18 px band leaves 12 px of content.
+        # That fits the 9 px label and the 2 px line.
         layout.setContentsMargins(0, 4, 0, 2)
         layout.setSpacing(0)
 
-        # Uppercase by design (a small uppercase group label on the
-        # left) - `label.upper()` here so callers never need to
-        # upper-case in their own label vocabulary.
+        # ``upper()`` here, so callers do not need to upper-case their
+        # own label vocabulary.
         self._label = QtWidgets.QLabel(label.upper(), self)
         self._label.setObjectName("nsl_plugins_grid_group_divider_label")
         layout.addWidget(self._label)
@@ -840,7 +612,6 @@ class _GroupDivider(QtWidgets.QFrame):
         line.setObjectName("nsl_plugins_grid_group_divider_line")
         layout.addWidget(line, stretch=1)
 
-        # Frozen height; expands horizontally with the parent layout.
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding,
             QtWidgets.QSizePolicy.Fixed,
@@ -855,14 +626,10 @@ class _GroupDivider(QtWidgets.QFrame):
 class PluginsGrid(QtWidgets.QScrollArea):
     """Dynamic multi-column pill grid with marquee selection.
 
-    Construct with a list of pill ``keys`` and a ``pill_factory(key) -> QWidget``.
-    The grid creates one :class:`_Cell` per key, parents the pill widget
-    into the cell, and lays out cells in a dynamic column grid that
-    reflows on resize. Marquee drag and ctrl-click drive the
-    ``selection_changed(list)`` signal.
-
-    Selection state is held internally only to drive cell paint - the
-    canonical selection model lives elsewhere.
+    Construct with pill ``keys`` and a ``pill_factory(key) -> QWidget``.
+    The grid makes one :class:`_Cell` per key, parents the pill into the
+    cell, and reflows the columns on resize. Marquee drag and ctrl-click
+    drive ``selection_changed(list)``.
     """
 
     selection_changed = QtCore.Signal(list)
@@ -887,16 +654,10 @@ class PluginsGrid(QtWidgets.QScrollArea):
         self._pill_min_width = PILL_MIN_WIDTH
         self._pill_max_width = PILL_MAX_WIDTH
 
-        # Viewport widget that hosts cells and paints the marquee overlay.
         self._viewport = _GridViewport(self)
         self._viewport.setObjectName("PluginsGridViewport")
         self.setWidget(self._viewport)
 
-        # Empty-state placeholder - shown when ``_keys`` is empty (no
-        # plugins after filter, or no plugins at all). Centred muted text;
-        # no chrome. The first-run "no folders yet" prompt is a
-        # different surface (handled by :mod:`nsl.ui.empty_state`); this
-        # placeholder is the grid-empty case.
         self._empty_label = QtWidgets.QLabel(
             EMPTY_PLACEHOLDER_TEXT, self._viewport
         )
@@ -911,7 +672,6 @@ class PluginsGrid(QtWidgets.QScrollArea):
         )
         self._empty_label.hide()
 
-        # Create cells and pills.
         self._cells: List[_Cell] = []
         self._pills: List[QtWidgets.QWidget] = []
         for key in self._keys:
@@ -923,52 +683,34 @@ class PluginsGrid(QtWidgets.QScrollArea):
             self._pills.append(pill)
             self._connect_pill_selection(key, pill)
 
-        # Group-divider state. Parallel to ``_keys``; entries are the
-        # divider label for the bucket each pill belongs to, or ``None``
-        # for alphabetical sort modes that don't group. The wiring layer
-        # populates this via :meth:`set_group_labels` after each sort.
-        # Empty list → no grouping → legacy uniform layout.
+        # One divider label per key, or ``None`` for a sort mode that
+        # does not group. The wiring layer sets it after each sort. An
+        # empty list means the uniform layout.
         self._group_labels: List[Optional[str]] = []
-        # Throwaway divider widgets - recreated on every ``_relayout``
-        # because their geometry depends on viewport width and current
-        # row arrangement.
         self._dividers: List[_GroupDivider] = []
-        # Parallel list of ``(y_top, y_bottom)`` tuples for each emitted
-        # divider strip. Stored alongside the widgets so the cell-
-        # hairline painter can query the gutter zones without poking
-        # widget geometry every paint. Empty when no grouping is active.
+        # ``(y_top, y_bottom)`` per emitted divider, so the hairline
+        # painter can find the gutter zones without reading geometry.
         self._divider_y_ranges: List[Tuple[int, int]] = []
 
-        # Marquee overlay sits ABOVE the cells so the rubber-band paints
-        # on top of pill bodies. Created after cells so ``raise_()`` puts
-        # it last in the z-order. Transparent to mouse - the viewport
-        # below keeps receiving press/move/release.
+        # Built after the cells, so ``raise_()`` puts it last in the
+        # z-order and the rubber-band paints over the pill bodies.
         self._marquee_overlay = _MarqueeOverlay(self._viewport)
         self._marquee_overlay.raise_()
 
-        # Marquee drag state (lives on the viewport, but the grid owns it
-        # to keep the viewport class minimal).
         self._marquee_active = False
         self._marquee_origin: Optional[QtCore.QPoint] = None
         self._marquee_current: Optional[QtCore.QPoint] = None
 
-        # Wire up the viewport's mouse events.
         self._viewport.mouse_press = self._on_viewport_mouse_press
         self._viewport.mouse_move = self._on_viewport_mouse_move
         self._viewport.mouse_release = self._on_viewport_mouse_release
-        # Viewport paint composes two passes: dividers under the marquee
-        # box. Both painted on the viewport, both under the cell widgets,
-        # so the cell selection tint sits on top of dividers and the
-        # marquee box sits on top of everything.
+        # The viewport paints the dividers under the cell widgets. The
+        # marquee box is a separate raised overlay above everything.
         self._viewport.paint_overlay = self._paint_viewport_overlay
-        # When QScrollArea stretches the inner viewport widget taller
-        # than ``content_h`` (because the populated cells don't fill the
-        # scroll area), the marquee overlay must follow - otherwise the
-        # rubber-band paint is clipped at the bottom of the last row
-        # and a drag into the empty area below reads as "cut off".
+        # The overlay must follow when QScrollArea stretches the inner
+        # widget, or the rubber-band is clipped at the last row.
         self._viewport.resize_hook = self._on_viewport_resize
 
-        # Initial layout.
         self._relayout()
 
     # ------------------------------------------------------------------
@@ -994,37 +736,29 @@ class PluginsGrid(QtWidgets.QScrollArea):
         self._relayout()
 
     def set_keys(self, keys: Sequence[str]) -> bool:
-        """Replace the grid's contents with a fresh set of plugin keys.
+        """Replace the grid contents with a fresh set of plugin keys.
 
-        Used by :meth:`LoadoutPanel.refresh_from_registry` on Loadout
-        switch - the new active Loadout's plugin set may differ from the
-        previous one, and the grid rebuilds in place rather than
-        re-instantiating. Selection is cleared (the previous selection
-        rarely makes sense against new keys). Callers that need to
-        re-attach signals to the freshly-created pills must invoke
-        :func:`nsl.ui.wiring.events.rewire_grid_pills` after this call.
+        The grid rebuilds in place and clears the selection. Call
+        :func:`nsl.ui.wiring.events.rewire_grid_pills` afterwards to
+        re-attach signals to the new pills.
 
-        Returns ``True`` when a rebuild actually happened, ``False`` when
-        ``keys`` matches the current set (no-op). Callers use this to
+        Returns ``True`` when a rebuild happened. Callers use that to
         avoid stacking duplicate signal connections on each refresh.
         """
         new_keys = list(keys)
         if new_keys == self._keys:
             return False
 
-        # Tear down old cells + pills. setParent(None) detaches from the
-        # Qt parent chain; deleteLater queues actual destruction so the
-        # current event handler completes before the widget vanishes.
+        # ``deleteLater`` queues the destruction, so the current event
+        # handler finishes before the widget goes away.
         for cell in self._cells:
             cell.setParent(None)
             cell.deleteLater()
         self._cells = []
         self._pills = []
         self._selected = set()
-        # Stale group labels are aligned to the old key order; drop
-        # them so a callers that doesn't immediately push fresh ones
-        # via ``set_group_labels`` doesn't paint mismatched dividers.
-        # Divider widgets themselves are torn down inside ``_relayout``.
+        # The old labels line up with the old keys. Drop them so a caller
+        # that pushes no fresh ones paints no mismatched dividers.
         self._group_labels = []
 
         self._keys = new_keys
@@ -1037,7 +771,6 @@ class PluginsGrid(QtWidgets.QScrollArea):
             self._pills.append(pill)
             self._connect_pill_selection(key, pill)
 
-        # Marquee overlay must stay above the freshly-created cells.
         self._marquee_overlay.raise_()
         self._relayout()
         self.selection_changed.emit([])
@@ -1046,20 +779,12 @@ class PluginsGrid(QtWidgets.QScrollArea):
     def set_group_labels(self, labels: Sequence[Optional[str]]) -> None:
         """Set per-pill divider labels, aligned to :meth:`keys`.
 
-        Pass a list of the same length as :meth:`keys`; each entry is
-        the divider-bucket label for the matching pill, or ``None`` to
-        place the pill in the "no divider above me" stream (used for
-        alphabetical sort modes that don't group). A bucket transition
- - any change between consecutive non-``None`` labels - emits a
-        :class:`_GroupDivider` strip above the first pill of the new
-        bucket. The very first non-``None`` label also gets a leading
-        divider header (every bucket is visibly labelled).
+        Pass one entry per key: the bucket label, or ``None`` for a pill
+        with no divider above it. An empty list clears the dividers.
 
-        Mismatched lengths reset to no-grouping rather than raise - the
-        wiring layer occasionally races a recompute against a refresh;
-        the worst case is one frame of un-divided pills before the next
-        push lines up, which beats throwing an exception into a Qt
-        slot. An empty list also clears any existing dividers.
+        A length mismatch resets to no grouping instead of raising. The
+        wiring layer sometimes races a recompute against a refresh, and
+        one frame of un-divided pills beats an exception in a Qt slot.
         """
         labels_list = [
             (str(label) if label is not None else None) for label in labels
@@ -1098,17 +823,11 @@ class PluginsGrid(QtWidgets.QScrollArea):
         self.selection_changed.emit(list(self._selected))
 
     def _connect_pill_selection(self, key: str, pill) -> None:
-        """Wire a pill's ``selection_requested`` signal - if present - to
-        the grid's selection state.
+        """Connect a pill's ``selection_requested`` signal, when it has one.
 
-        Pills own their own ``mousePressEvent`` and swallow body clicks
-        (toggling the plugin's enabled state). Qt does not auto-propagate
-        child mouse events, so a modifier-held click on a pill body would
-        otherwise never reach the grid's marquee handler. The pill
-        intercepts the modifier case and re-emits as a selection request
-        carrying the ``Qt.KeyboardModifiers``; the grid maps shift → add
-        and ctrl/cmd → smart toggle. Plain clicks still drop through to
-        the pill's existing enable-toggle path.
+        Pills swallow body clicks and Qt does not propagate child mouse
+        events. A modifier-held click is re-emitted as this signal.
+        Plain clicks still reach the pill's enable toggle.
         """
         signal = getattr(pill, "selection_requested", None)
         if signal is None:
@@ -1120,9 +839,8 @@ class PluginsGrid(QtWidgets.QScrollArea):
                 )
             )
         except Exception:
-            # Pills without a real Qt signal (duck-typed stand-ins)
-            # quietly skip - the marquee/cell-padding selection path is
-            # still in place for them.
+            # Duck-typed stand-ins have no real Qt signal. They still
+            # get the marquee and cell-padding selection path.
             pass
 
     def _on_pill_selection_request(self, key: str, modifiers) -> None:
@@ -1137,16 +855,14 @@ class PluginsGrid(QtWidgets.QScrollArea):
             )
         )
         if any_modifier:
-            # Smart toggle - modifier-click on a selected pill removes
-            # it, on an unselected pill adds it. Matches Finder /
-            # Photoshop-style modifier semantics.
+            # Modifier-click removes a selected pill and adds an
+            # unselected one.
             self._selected = toggle_selection(
                 self._selected, key, additive=True
             )
         else:
-            # Defensive: pill only emits with a modifier held. If a
-            # future caller emits without one, treat as plain-click
-            # replace.
+            # The pill only emits with a modifier held. A bare emit
+            # falls back to plain-click replace.
             self._selected = {key}
         self._apply_selected_paint()
         self.selection_changed.emit(list(self._selected))
@@ -1160,14 +876,14 @@ class PluginsGrid(QtWidgets.QScrollArea):
         self._relayout()
 
     def _viewport_width(self) -> int:
-        # ``viewport()`` is the scroll area's viewport; we use its width
-        # to drive the column count so the scrollbar doesn't cause loops.
+        # The scroll area viewport, not the inner widget. Its width
+        # drives the column count, so the scrollbar cannot cause a loop.
         return int(self.viewport().width())
 
     def _relayout(self) -> None:
         vw = max(1, self._viewport_width())
-        # Empty grid - show the placeholder and short-circuit. The label
-        # spans the viewport so it stays centred when the panel resizes.
+        # Empty grid. The label spans the viewport so it stays centred
+        # when the panel resizes.
         if not self._cells:
             content_h = max(120, int(self.viewport().height()))
             self._viewport.setMinimumHeight(content_h)
@@ -1194,34 +910,23 @@ class PluginsGrid(QtWidgets.QScrollArea):
             grid_margin=GRID_MARGIN,
         )
 
-        # Place cells - they tile the viewport's usable width edge-to-edge
-        # with no slack (``cell_widths`` divides usable / columns evenly).
-        # Each pill is rendered at its **constant** sizeHint
-        # (``pill._MIN_W × pill._MIN_H``) and centred inside its cell -
-        # pills never squash or stretch. Any extra cell space (when the
-        # viewport widens past the column-pack threshold) becomes
-        # additional padding zone around the pill (where marquee drags
-        # can start); the pill body itself
-        # is one constant size across every viewport width.
+        # Cells tile the usable width with no slack. Each pill renders at
+        # its constant sizeHint and is centred. Extra cell width becomes
+        # padding where a marquee drag can start.
         from nsl.ui.pill import (
             _MIN_W as _PILL_W,
             _MIN_H as _PILL_H,
             _SHADOW_MARGIN as _PILL_SHADOW,
         )
 
-        # Tear down any divider widgets from the previous layout.
-        # Dividers are throwaway because their y depends on the new
-        # column count and the new label list.
         for d in self._dividers:
             d.setParent(None)
             d.deleteLater()
         self._dividers = []
         self._divider_y_ranges = []
 
-        # Resolve per-cell positions. When ``_group_labels`` is empty
-        # (no grouping requested) ``layout_with_dividers`` returns the
-        # byte-identical uniform layout - so the legacy non-grouped
-        # path stays pixel-for-pixel unchanged.
+        # With no labels, ``layout_with_dividers`` returns the uniform
+        # layout, so the non-grouped path is unchanged.
         labels = (
             list(self._group_labels)
             if self._group_labels
@@ -1240,26 +945,15 @@ class PluginsGrid(QtWidgets.QScrollArea):
 
         for cell, (x, y, w, h), pill in zip(self._cells, cell_rects, self._pills):
             cell.setGeometry(QtCore.QRect(x, y, w, h))
-            # Pill at constant size, centred. If the cell is narrower
-            # than the pill (theoretically impossible because the
-            # column-count math respects ``pill_min_width``), the pill
-            # is clamped to fit so it doesn't overflow the cell.
             pill_w = min(_PILL_W, w)
             pill_h = min(_PILL_H, h)
             pill_x = (w - pill_w) // 2
             pill_y = (h - pill_h) // 2
             pill_rect = QtCore.QRect(pill_x, pill_y, pill_w, pill_h)
             pill.setGeometry(pill_rect)
-            # Cell needs the **body** rect (inset by the pill's shadow
-            # margin) - NOT the full widget rect - to paint the selection
-            # halo. The pill widget reserves ``_PILL_SHADOW`` px around
-            # its body for the drop shadow; if we hand the cell the
-            # outer widget rect, the halo paints out at the shadow
-            # boundary and reads as misaligned with the visible pill.
-            # Pass the body rect so the halo hugs the rounded body
-            # itself. The same inset also drives hit-testing - a click
-            # in the shadow margin is "padding zone" and starts a
-            # marquee instead of toggling the pill.
+            # The cell needs the body rect, inset by the pill's shadow
+            # margin. Otherwise the ring paints at the shadow edge and
+            # reads as misaligned. The inset also marks marquee padding.
             body_rect = pill_rect.adjusted(
                 _PILL_SHADOW, _PILL_SHADOW,
                 -_PILL_SHADOW, -_PILL_SHADOW,
@@ -1268,14 +962,8 @@ class PluginsGrid(QtWidgets.QScrollArea):
             cell.show()
             pill.show()
 
-        # Materialise divider widgets at the positions the layout
-        # helper computed. Each divider is a fresh ``_GroupDivider``
-        # because re-using cached widgets across re-layouts would
-        # require keying them by (label, geometry) - cheaper to just
-        # rebuild on every relayout (typically 5-10 dividers max).
-        # Also record each divider's (y_top, y_bottom) on
-        # ``_divider_y_ranges`` so the cell-hairline painter can hop
-        # over the gutter zones cleanly.
+        # Fresh widgets each time. Record each gutter's
+        # ``(y_top, y_bottom)`` so the hairline painter can skip it.
         for label, dx, dy, dw, dh in divider_rects:
             divider = _GroupDivider(label, self._viewport)
             divider.setGeometry(QtCore.QRect(dx, dy, dw, dh))
@@ -1283,15 +971,12 @@ class PluginsGrid(QtWidgets.QScrollArea):
             self._dividers.append(divider)
             self._divider_y_ranges.append((dy, dy + dh))
 
-        # Resize the inner viewport widget so the scroll area knows the
-        # full content height and the scrollbar engages when needed.
+        # The scroll area needs the full content height before the
+        # scrollbar engages.
         self._viewport.setMinimumHeight(content_h)
         self._viewport.resize(vw, content_h)
-        # Marquee overlay must cover the full inner viewport widget - not
-        # just ``content_h``. When the scroll area is taller than the
-        # populated cells, QScrollArea (widgetResizable=True) stretches
-        # the inner widget; use its actual height so rubber-band paint
-        # extends into the empty area below the last populated row.
+        # The widget's real height, not ``content_h``. QScrollArea can
+        # stretch it past the content.
         overlay_h = max(content_h, self._viewport.height())
         self._marquee_overlay.setGeometry(0, 0, vw, overlay_h)
         self._marquee_overlay.raise_()
@@ -1299,11 +984,8 @@ class PluginsGrid(QtWidgets.QScrollArea):
     def _on_viewport_resize(self, event) -> None:
         """Track the inner viewport widget's actual size.
 
-        QScrollArea (``setWidgetResizable(True)``) resizes the inner
-        widget to fill the scroll area when content is shorter than the
-        visible area. The marquee overlay needs to follow so a drag
-        into that empty region still paints the rubber-band; the cell
-        dividers also need to repaint to fill the new extent.
+        QScrollArea resizes the inner widget to fill the scroll area when
+        the content is shorter. The overlay and dividers must follow.
         """
         size = self._viewport.size()
         self._marquee_overlay.setGeometry(0, 0, size.width(), size.height())
@@ -1346,12 +1028,8 @@ class PluginsGrid(QtWidgets.QScrollArea):
         self._release_at(event.pos(), event.modifiers())
 
     # ------------------------------------------------------------------
-    # Event-shape-independent entry points. ``_Cell`` forwards its own
-    # press/move/release here so a click in the cell padding (between the
-    # pill body and the cell edge) reaches the marquee logic. The
-    # viewport's wrappers above call the same methods for clicks that
-    # land directly on the viewport (gaps below the last populated row,
-    # outer margins).
+    # ``_Cell`` forwards its press, move and release here. A click in the
+    # cell padding then reaches the marquee logic.
     # ------------------------------------------------------------------
 
     def _press_at(self, pos: "QtCore.QPoint", modifiers) -> None:
@@ -1385,8 +1063,8 @@ class PluginsGrid(QtWidgets.QScrollArea):
     def _release_at(self, pos: "QtCore.QPoint", modifiers) -> None:
         if not self._marquee_active:
             return
-        # Update the end-point one last time so a release that fires
-        # without an intervening move still has the right rect.
+        # A release can fire with no move in between, so refresh the end
+        # point here.
         self._marquee_current = self._clamp_to_viewport(pos)
         rect = self._current_marquee_rect()
         additive = bool(
@@ -1397,12 +1075,9 @@ class PluginsGrid(QtWidgets.QScrollArea):
                 | QtCore.Qt.MetaModifier
             )
         )
-        # Zero-size marquee = a click without a drag. With a modifier
-        # held, treat a click anywhere inside a cell (including its
-        # padding zone) as targeting that cell's pill - "shift-click in
-        # the grid unit selects it" per the user's mental model. Without
-        # a modifier, a zero-size release on padding captures nothing
-        # (the implicit selection-clear on press is the final state).
+        # A zero-size marquee is a click with no drag. With a modifier
+        # held it selects the cell under the cursor, padding included.
+        # Without one it captures nothing.
         captured_keys: Set[str] = set()
         zero_size_click = rect[2] == 0 and rect[3] == 0
         if zero_size_click:
@@ -1424,11 +1099,8 @@ class PluginsGrid(QtWidgets.QScrollArea):
             hits = marquee_hits(rect, self._all_cell_rects())
             captured_keys = {self._keys[i] for i in hits}
         if additive:
-            # Any modifier (shift / ctrl / cmd) → **smart toggle**:
-            #   * Every captured pill already selected ⇒ remove them.
-            #   * Mixed / all-unselected captured ⇒ union (add).
-            # A single modifier-click on a selected pill therefore
-            # deselects it; on an unselected pill, adds it.
+            # Smart toggle. Remove the captured pills when every one is
+            # already selected, and add them otherwise.
             if captured_keys and captured_keys.issubset(self._selected):
                 self._selected -= captured_keys
             else:
@@ -1455,33 +1127,21 @@ class PluginsGrid(QtWidgets.QScrollArea):
         return (x, y, w, h)
 
     def _paint_viewport_overlay(self, painter: "QtGui.QPainter") -> None:
-        """Viewport-level overlay paint - currently dividers only. The
-        marquee rubber-band lives on a separate top-most child overlay
-        (:class:`_MarqueeOverlay`) so it can sit above all pill bodies.
+        """Paint the viewport overlay, currently the cell dividers only.
+
+        The marquee box lives on :class:`_MarqueeOverlay`, above the pills.
         """
         self._paint_cell_dividers(painter)
 
     def _paint_cell_dividers(self, painter: "QtGui.QPainter") -> None:
-        """Draw 1 px hairlines between cells so the grid reads as
-        discrete blocks rather than a flat tiled surface. Drawn on the
-        viewport (not on each cell) so adjacent cells don't double-paint
-        the same line.
+        """Draw 1 px hairlines between cells.
 
-        Lines extend across the full viewport - both axes - so the grid
-        reads as a continuous lined plane even when the populated cells
-        don't fill it. Empty grid slots below the last populated row
-        and to the right of a partial last row still show their column
-        and row structure.
+        Painted on the viewport, not on each cell, so neighbours do not
+        double-paint a line. The lines cross the full viewport, so empty
+        slots still show the grid structure.
 
-        Horizontal hairlines are **gutter-aware**: each pill row's bottom
-        edge gets a hairline IF that y doesn't fall strictly inside a
-        gutter zone (``self._divider_y_ranges``). Below the last populated
-        row, painting continues at uniform ``CELL_HEIGHT`` intervals so
-        empty grid slots still read as grid surface. The hairlines stay
-        (rather than being suppressed under grouping) so the grid keeps
-        its lined feel; they simply align with the shifted pill rows.
-        Vertical column lines paint regardless - column structure is
-        stable.
+        A horizontal hairline is skipped inside a gutter zone, where the
+        gutter's own dark colour separates the rows.
         """
         if self._columns <= 0 or self._cell_w <= 0:
             return
@@ -1498,18 +1158,12 @@ class PluginsGrid(QtWidgets.QScrollArea):
 
         # Horizontal lines.
         if not self._cells:
-            # Empty grid: uniform CELL_HEIGHT intervals from the top so
-            # the placeholder area still shows row structure.
+            # Uniform rows, so the placeholder area still reads as grid.
             y = GRID_MARGIN_V + CELL_HEIGHT
             while y < vp_h:
                 painter.drawLine(0, y, vp_w, y)
                 y += CELL_HEIGHT
         else:
-            # Populated grid: paint a hairline at the bottom of each
-            # unique pill row. Skip any candidate y that falls strictly
-            # inside a gutter band - the gutter's own dark colour is
-            # the row separator there, and a hairline through the
-            # gutter would read as visual noise.
             row_tops = sorted({c.geometry().y() for c in self._cells})
             last_painted_y = GRID_MARGIN_V
             for y_top in row_tops:
@@ -1520,19 +1174,16 @@ class PluginsGrid(QtWidgets.QScrollArea):
                     continue
                 painter.drawLine(0, y, vp_w, y)
                 last_painted_y = y
-            # Past the last populated row, continue at uniform
-            # CELL_HEIGHT intervals so the grid feels like it
-            # extends past the pills (matches the legacy "infinite
-            # grid" behaviour the ungrouped path always had).
+            # Keep going below the last row, so the grid reads as
+            # continuing past the pills.
             y = last_painted_y + CELL_HEIGHT
             while y < vp_h:
                 if not _y_inside_any(y, self._divider_y_ranges):
                     painter.drawLine(0, y, vp_w, y)
                 y += CELL_HEIGHT
 
-        # Vertical lines: every column boundary, full viewport height,
-        # so empty cells (right of a partial last row, or anywhere below
-        # the last populated row) still show the column structure.
+        # Every column boundary, full height, so empty cells still show
+        # the column structure.
         for col_i in range(1, self._columns):
             x = grid_x0 + col_i * self._cell_w
             painter.drawLine(x, 0, x, vp_h)
@@ -1552,26 +1203,20 @@ class PluginsGrid(QtWidgets.QScrollArea):
 
 
 # ---------------------------------------------------------------------------
-# Inner viewport widget - paints marquee overlay, forwards mouse events
+# Marquee overlay and inner viewport widget
 # ---------------------------------------------------------------------------
 
 
 class _MarqueeOverlay(QtWidgets.QWidget):
-    """Top-most overlay child of the grid viewport - paints the marquee
-    rubber-band box on top of every cell and pill.
+    """Top-most overlay child of the grid viewport. Paints the marquee box.
 
-    Cells live as children of the viewport, so anything painted on the
-    viewport itself sits underneath them. The marquee needs to read as
-    "drawn on top of the grid" so the user can see it crossing pill bodies
- - this overlay is raised above the cells and stays transparent to
-    mouse events so the grid's existing press/move/release handlers on
-    the viewport keep working.
+    Cells are children of the viewport, so viewport paint sits under
+    them. This overlay is raised above the cells and stays transparent
+    to mouse events, so the grid's own handlers keep working.
     """
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
-        # Transparent to mouse so the underlying viewport keeps receiving
-        # press / move / release - the overlay is purely a paint surface.
         self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
         # No system background fill so cells underneath show through.
         self.setAttribute(QtCore.Qt.WA_NoSystemBackground, True)
@@ -1603,16 +1248,15 @@ class _MarqueeOverlay(QtWidgets.QWidget):
 
 
 class _GridViewport(QtWidgets.QWidget):
-    """The scroll area's inner widget. Hosts cells; paints marquee overlay.
+    """The scroll area's inner widget. Hosts the cells.
 
-    Mouse-event forwarding is wired via callable attributes set by
-    :class:`PluginsGrid` after construction. This keeps the viewport class
-    Qt-only and the grid logic in one place.
+    :class:`PluginsGrid` sets the mouse and paint hooks as callable
+    attributes after construction, which keeps this class Qt-only.
     """
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
-        # Enable mouse-tracking so move events fire without a button held.
+        # Move events must fire without a button held.
         self.setMouseTracking(True)
         self.setFocusPolicy(QtCore.Qt.ClickFocus)
         self.mouse_press: Optional[Callable] = None
@@ -1624,10 +1268,9 @@ class _GridViewport(QtWidgets.QWidget):
     def mousePressEvent(self, event):  # pragma: no cover - GUI path
         if self.mouse_press is not None:
             self.mouse_press(event)
-        # Accept so Qt grabs the mouse to this viewport for the rest of
-        # the drag; otherwise QWidget's default ``ignore()`` lets the
-        # press bubble to QScrollArea and subsequent move / release
-        # events never reach our hooks.
+        # Accept so Qt grabs the mouse for the rest of the drag. The
+        # default ``ignore()`` sends the press up to QScrollArea and the
+        # move and release never reach these hooks.
         event.accept()
 
     def mouseMoveEvent(self, event):  # pragma: no cover - GUI path
@@ -1646,10 +1289,8 @@ class _GridViewport(QtWidgets.QWidget):
             self.resize_hook(event)
 
     def paintEvent(self, event):  # pragma: no cover - exercised via grab()
-        # Recessed grid background. Filled in paintEvent (not via
-        # ``setAutoFillBackground`` + palette) so the colour stays
-        # explicit and doesn't depend on the host palette inheritance
-        # chain - important inside the QScrollArea viewport hierarchy.
+        # Fill the background here, not with a palette. Palette
+        # inheritance in the QScrollArea would otherwise pick the colour.
         painter = QtGui.QPainter(self)
         try:
             r, g, b = GRID_BG_COLOUR
