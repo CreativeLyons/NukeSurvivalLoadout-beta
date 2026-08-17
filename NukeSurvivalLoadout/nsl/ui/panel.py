@@ -1,42 +1,14 @@
 """Top-level NSL Loadout Panel - composes the region widgets.
 
-This module is the single composition surface for the panel. The
-composition is:
-
-* The top-of-panel toolbar (Undo / Redo / Reset panel), always visible.
-* The change-detected banner (hidden by default - zero layout cost when
-  hidden). Attached as an overlay pinned to the populated grid
-  container's top edge so it never pushes the grid layout down and never
-  appears over the empty state.
-* The loadout selector strip (active Loadout + ops + panic), nested
-  under the Plugins Folder card in the left column.
-* The search-and-tags strip (search + chip filter + bulk-action buttons)
-  and the plugins grid toolbar (bulk ops + sort), tied together into a
-  single fixed-height "discovery block" so the two strips slide as one
-  when the active divider above them is dragged.
-* The pill grid region - a :class:`QStackedWidget` swapping between the
-  populated :class:`PluginsGrid` (page 0) and the
-  :class:`EmptyStateWidget` (page 1) based on folder count. The empty
-  page paints the grid's ``#2d2d2d`` backdrop via ``setPalette`` so it
-  reads as occupying the same recessed channel.
-* Two active dividers - one horizontal (folder/side, 60/40 default with
-  snap-back) and one vertical (pair ↔ grid, with the discovery block
-  sliding rigidly in between). All other dividers are locked.
-
-The default splitter sizes are captured at construction time and applied
-by :meth:`reset_panel_layout` (driven by the Reset panel signal).
+:meth:`LoadoutPanel._build_main` documents the widget hierarchy.
 
 Conventions:
 
-* Qt imports go only via :mod:`nsl.compat` - never
-  ``import PySide2`` / ``import PySide6`` directly.
-* Layout state - splitter positions, region collapsed states, side-panel
-  proportions, the side panel's active tab - is per-session and not
-  persisted.
-* ``Reset panel`` touches splitter sizes and collapsed states only -
-  not domain state, selection, sort, filter, Loadouts, or Plugins Folders.
-* No ``import nuke`` / ``import nukescripts``. Nuke integration lives in
-  top-level ``menu.py``.
+* Qt imports go only via :mod:`nsl.compat`, never ``import PySide2`` or
+  ``import PySide6``.
+* Layout state is per-session and never persisted.
+* ``Reset panel`` touches splitter sizes and collapsed states only.
+* No ``import nuke``. Nuke integration lives in top-level ``menu.py``.
 """
 
 from __future__ import annotations
@@ -45,8 +17,6 @@ from typing import TYPE_CHECKING, Optional
 
 from nsl import compat
 
-# Import the region widgets. They are part of the same
-# nsl/ui package and carry no nuke dependency.
 from nsl.ui._section import SectionBox
 from nsl.ui._splitters import HANDLE_QSS, HairlineSplitter, maybe_snap_splitter
 from nsl.ui.banner import Banner, BannerKind
@@ -66,12 +36,9 @@ from nsl.ui.grid import (
     compute_columns,
 )
 from nsl.ui.grid_toolbar import GridCounterStrip, PluginsGridToolbar
-# Canonical design-system GUI-only purple - shared with the "GUI:" counter
-# chip and the per-pill GUI badge so the Summary tag agrees on tone.
+# Same purple as the "GUI:" counter chip and the pill GUI badge.
 from nsl.ui.grid_toolbar import _COUNTER_PURPLE as _GUI_PURPLE
-# Pending-remove red - reused for the Summary's "- removed" tag so a plugin
-# that loaded this session but is now gone reads in the SAME red as the "-N"
-# pending-remove counter chip (they describe the same plugins).
+# Same red as the "-N" pending-remove chip. Both mark the same plugins.
 from nsl.ui.grid_toolbar import _COUNTER_RED as _REMOVED_RED
 from nsl.ui.loadout_strip import Loadout, LoadoutStrip
 from nsl.ui.pill import Palette, PillState, PluginPill, Source, StatusIcon, Tint
@@ -95,24 +62,14 @@ QtWidgets = compat.QtWidgets
 
 
 # ---------------------------------------------------------------------------
-# Default splitter geometry - captured at construction so Reset panel can
-# restore it.
+# Default splitter geometry
 # ---------------------------------------------------------------------------
 
-# Horizontal pair (folder/side): 60 / 40 default. This ratio keeps folder
-# paths legible while the side panel still has room for the README.
-# Snap-back tolerance lives at ±2.5 % around this split - see
-# :func:`maybe_snap_splitter`.
 _DEFAULT_FOLDER_SIDE_SPLIT = (60, 40)
 _FOLDER_SIDE_SNAP_TOLERANCE = 0.025
 
-# Bottom vertical splitter - three panes: (folder/side pair, discovery
-# block, pill grid). The discovery block is fixed-height (sizeHint clamp),
-# so only the first and third panes are elastic. Stretch factors (1, 0, 4)
-# give the grid roughly 80 % of the elastic height. The integer tuple
-# below is what gets passed back through ``setSizes`` on Reset panel - Qt
-# re-normalises against actual widget width, so the absolute values just
-# describe the proportion.
+# Panes: folder/side pair, discovery block, pill grid. Qt re-normalises
+# these on ``setSizes``, so they are a proportion and not pixels.
 _DEFAULT_VERTICAL_SPLIT = (260, 110, 1040)
 
 
@@ -122,20 +79,11 @@ _DEFAULT_VERTICAL_SPLIT = (260, 110, 1040)
 
 
 class _EmptyStatePage(QtWidgets.QWidget):
-    """Empty-state page that paints the same grid the populated grid uses.
+    """Empty-state page that paints the populated grid's divider lines.
 
-    Without this, the empty area read as a flat dark void that didn't
-    visually rhyme with the populated grid above/below. Painting the
-    same ``CELL_DIVIDER_COLOUR`` lines at the same ``CELL_HEIGHT`` pitch
-    + column boundaries (derived from the current width via the grid's
-    own ``compute_columns`` / ``cell_widths``) tells the user "this is
-    where your plugins will live" without competing with the welcome
-    message overlaid on top.
-
-    The page still owns its recessed ``#2d2d2d`` background via the
-    autoFillBackground + palette pattern set by the panel - paintEvent
-    runs after the native background fill, so the grid lines render on
-    top of the recessed channel exactly the way the populated grid does.
+    Uses the grid's own ``compute_columns`` and ``cell_widths`` so the
+    two match. The panel paints the background through the palette, and
+    ``paintEvent`` runs after that fill.
     """
 
     def paintEvent(self, event):  # noqa: N802 - Qt override
@@ -158,18 +106,12 @@ class _EmptyStatePage(QtWidgets.QWidget):
                 QtGui.QPainter.Antialiasing, False
             )
 
-            # Horizontal lines at uniform CELL_HEIGHT intervals - same
-            # algorithm the populated grid uses for its empty-cells
-            # region past the last pill row.
             y = GRID_MARGIN_V + CELL_HEIGHT
             while y < h:
                 painter.drawLine(0, y, w, y)
                 y += CELL_HEIGHT
 
-            # Vertical column boundaries - start at GRID_MARGIN +
-            # cell_w (no line down the left edge); skip the right
-            # edge (no line down the right edge); columns - 1 lines
-            # total, matching the populated grid's _paint_grid_lines.
+            # Column boundaries only. No line down the left or right edge.
             grid_x0 = GRID_MARGIN
             for col_i in range(1, cols):
                 x = grid_x0 + col_i * cell_w
@@ -186,40 +128,19 @@ class _EmptyStatePage(QtWidgets.QWidget):
 class LoadoutPanel(QtWidgets.QWidget):
     """Top-level Loadout Panel.
 
-    Composes the region widgets via nested :class:`QSplitter` instances
-    so each region is resizable and collapsible. The widget exposes its
-    region children as public attributes so the wiring helpers
-    (``wire_<module>(panel)``) can reach them without poking at private
-    state:
+    Region widgets are public attributes so the ``wire_<module>(panel)``
+    helpers can reach them.
 
-    * :attr:`top_toolbar` - :class:`TopToolbar`
-    * :attr:`banner` - :class:`Banner` (hidden by default)
-    * :attr:`loadout_strip` - :class:`LoadoutStrip`
-    * :attr:`search_tags` - :class:`SearchTagsStrip`
-    * :attr:`grid_toolbar` - :class:`PluginsGridToolbar`
-    * :attr:`folder_card` - :class:`FolderCard`
-    * :attr:`grid` - :class:`PluginsGrid`
-    * :attr:`side_panel` - :class:`SidePanel`
+    Splitters, used by :meth:`reset_panel_layout`:
 
-    Splitter attributes (used by :meth:`reset_panel_layout`):
+    * :attr:`_folder_side_split` - left column and side panel. Active,
+      and snaps back to the 60 / 40 default.
+    * :attr:`_vertical_split` - pair, discovery block, grid. Only the
+      divider above the discovery block is active.
+    * :attr:`_left_col_split` - folder card over Loadout strip. Locked.
 
-    * :attr:`_folder_side_split` - horizontal: folder/loadout left column
-      ↔ side panel. The "pair". Snap-back wired to the 60 / 40
-      default with ±2.5 % tolerance.
-    * :attr:`_vertical_split` - vertical: pair ↔ discovery block ↔ pill
-      grid (with the grid being a :class:`QStackedWidget` swap between
-      populated grid + empty state). Two handles total - the active one
-      above the discovery block (drag trades pair-height for grid-height)
-      and the locked one below it.
-    * :attr:`_left_col_split` - vertical, inside the folder/side pair's
-      left column: Plugins Folder card on top, Loadout selector strip
-      below. Locked divider; not part of the Reset panel surface.
-
-    The default sizes the splitters were constructed with are captured at
-    build time and re-applied by :meth:`reset_panel_layout` - this is the
-    Reset panel button's effect. The reset touches splitter sizes and
-    collapsed states **only**; it never affects domain state, selection,
-    sort, filter, Loadouts, or Plugins Folders.
+    Reset panel replays the sizes captured at build time. It never
+    touches domain state.
     """
 
     def __init__(
@@ -233,16 +154,10 @@ class LoadoutPanel(QtWidgets.QWidget):
         super().__init__(parent)
         self.setObjectName("NSLLoadoutPanel")
 
-        # The Registry is the state-shape carrier every wiring helper
-        # reads off. Production panels build one via
-        # ``nsl.ui.registry_bootstrap.build_registry_for_panel`` and
-        # pass it here; callers that leave it ``None`` get a soft wiring
-        # mode that swallows registry-missing errors. See the
-        # no-registry-vs-production branch in :meth:`_wire_signals`.
+        # Leaving this ``None`` puts wiring in a soft mode that swallows
+        # errors. See the branch in :meth:`_wire_signals`.
         self.registry = registry
 
-        # Region widgets - instantiate before the layout build so the wiring
-        # layer can grab references during construction if it needs to.
         self.top_toolbar = TopToolbar(self)
         self.banner = Banner(self)
         self.grid_counters = GridCounterStrip(self)
@@ -250,17 +165,10 @@ class LoadoutPanel(QtWidgets.QWidget):
         self.search_tags = SearchTagsStrip(self)
         self.grid_toolbar = PluginsGridToolbar(self)
         self.folder_card = FolderCard(self)
-        # Side panel is a non-QWidget wrapper exposing a ``.widget`` attribute
-        # plus the QTabWidget on ``.tabs``. We embed ``.widget`` into the
-        # layout; tests and wiring helpers reach the tab content via
-        # ``panel.side_panel`` (the wrapper) directly.
+        # SidePanel is not a QWidget. It wraps one on ``.widget`` and
+        # holds the QTabWidget on ``.tabs``.
         self.side_panel = SidePanel(self)
 
-        # Plugins grid - caller may inject keys + factory. When a registry
-        # is attached we install a registry-aware factory that calls
-        # :func:`nsl.ui.state.pill_state_from` so
-        # freshly-rebuilt pills carry the right state. Without a registry
-        # we fall back to the placeholder factory.
         if pill_factory is None:
             if self.registry is not None:
                 pill_factory = self._registry_pill_factory
@@ -269,38 +177,23 @@ class LoadoutPanel(QtWidgets.QWidget):
         self._pill_factory = pill_factory
         self.grid = PluginsGrid(list(grid_keys or []), pill_factory, self)
 
-        # Layout build
         self._build_main()
 
-        # Capture default splitter sizes so Reset panel can restore them.
-        #
-        # Reset at the default layout must be a true no-op. Raw ratio math
-        # against ``_DEFAULT_FOLDER_SIDE_SPLIT`` / ``_DEFAULT_VERTICAL_SPLIT``
-        # can't reproduce Qt's actual construct-time layout, which is shaped
-        # by stretch factors + fixed-height children + each pane's
-        # ``minimumSizeHint`` - so replaying ratios on Reset visibly shifts
-        # the panes.
-        #
-        # Instead: seed the cached sizes from the ratio tuples for off-screen
-        # consumers that never get a ``showEvent``, then overwrite with
-        # Qt's actual ``sizes()`` the first time the panel is shown via
-        # :meth:`showEvent`. After that one-shot capture, Reset replays
-        # exact integer sizes Qt already laid the panel out to - so Reset
-        # at the default layout leaves the panel untouched.
+        # Seed the Reset targets from the ratio tuples, for consumers
+        # that never get a ``showEvent``. :meth:`showEvent` then
+        # overwrites them with the sizes Qt actually laid out.
         self._default_folder_side_sizes = list(_DEFAULT_FOLDER_SIDE_SPLIT)
         self._default_vertical_sizes = list(_DEFAULT_VERTICAL_SPLIT)
         self._default_sizes_captured = False
         self._default_side_panel_tab_index = self.side_panel.tabs.currentIndex()
 
-        # Install the panel-side refresh callback before wiring runs so
-        # any ``apply_op_result`` triggered during initial wiring re-emits
-        # widget state correctly.
+        # Attach before wiring runs, so an ``apply_op_result`` fired
+        # during wiring still repaints the widgets.
         if self.registry is not None:
             self.registry.attach_refresh(self.refresh_from_registry)
             self.registry.attach_parent_widget(self)
-            # Side-panel ⟳ refresh button → re-read the README + menu.py for
-            # the plugins the Info / Menu tabs currently show (picks up
-            # external edits without a full plugin rescan).
+            # The side-panel refresh button re-reads the README and
+            # menu.py for the Info and Menu tabs. It runs no rescan.
             if hasattr(self.side_panel, "set_refresh_callback") and hasattr(
                 self.registry, "on_side_panel_refresh"
             ):
@@ -308,12 +201,8 @@ class LoadoutPanel(QtWidgets.QWidget):
                     self.registry.on_side_panel_refresh
                 )
 
-        # Wire intra-panel signals (Reset panel is the only one owned
-        # here). The wiring helpers extend :meth:`_wire_signals`.
         self._wire_signals()
 
-        # Initial refresh - populate widgets from the registry. The
-        # no-registry path leaves the registry None and skips this.
         if self.registry is not None:
             self.refresh_from_registry()
 
@@ -324,27 +213,15 @@ class LoadoutPanel(QtWidgets.QWidget):
 
         Hierarchy:
 
-        * Outer QVBoxLayout (8 px margins, 8 px spacing)
-          - TopToolbar (always visible, never wrapped in SectionBox -
-            chrome, not a content region)
-          - ``_vertical_split`` - vertical :class:`HairlineSplitter`
-            (the "bottom split"), three panes:
-            * ``_folder_side_split`` - horizontal :class:`HairlineSplitter`
-              ("pair"), two panes:
-              - ``_left_col_split`` - vertical :class:`HairlineSplitter`,
-                two panes: SectionBox(FolderCard), SectionBox(LoadoutStrip).
-                Locked divider between them; LoadoutStrip non-collapsible.
-              - SectionBox(SidePanel.widget). Active divider between left
-                column and side panel; snap-back to 60 / 40 default.
-            * SectionBox(discovery_block) - SearchTagsStrip stacked over
-              PluginsGridToolbar in one fixed-height block; non-collapsible.
-              Active divider above it trades pair-height for grid-height
-              (the block slides as one).
-            * SectionBox(grid_stack) - :class:`QStackedWidget` with two
-              pages: grid_container (populated PluginsGrid + Banner
-              overlay) and empty_state_page (#2d2d2d backdrop +
-              EmptyStateWidget). Locked divider above (under discovery
-              block).
+        * Outer QVBoxLayout
+          - TopToolbar, never wrapped in a SectionBox
+          - ``_vertical_split``, three panes:
+            * ``_folder_side_split``, two panes:
+              - ``_left_col_split`` - FolderCard over LoadoutStrip
+              - SidePanel.widget
+            * discovery_block - SearchTagsStrip over PluginsGridToolbar,
+              then the counters row. Fixed height.
+            * grid_stack - the populated grid, or the empty-state page.
         """
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
@@ -359,29 +236,19 @@ class LoadoutPanel(QtWidgets.QWidget):
         self._folder_side_split.setHandleWidth(6)
         self._folder_side_split.setChildrenCollapsible(True)
 
-        # Left column: folder card on top, loadout strip below. Locked
-        # divider - neither side stretches or collapses meaningfully, so
-        # the handle is disabled (still present for visual structure,
-        # painted thinner + dimmer by HairlineHandle.paintEvent).
         self._left_col_split = HairlineSplitter(QtCore.Qt.Vertical, self)
         self._left_col_split.setObjectName("NSLLeftColSplit")
         self._left_col_split.setHandleWidth(6)
         self._left_col_split.setChildrenCollapsible(True)
-        # FolderCard renders its own QFrame.StyledPanel by default; SectionBox
-        # below provides the canonical bounding line so the built-in frame
-        # would double-paint. Suppress it.
+        # SectionBox draws the bounding line, so the card's own
+        # StyledPanel frame would double-paint.
         self.folder_card.setFrameShape(QtWidgets.QFrame.NoFrame)
         self._left_col_split.addWidget(SectionBox(self.folder_card, self))
         self._left_col_split.addWidget(SectionBox(self.loadout_strip, self))
-        # FolderCard takes most of the left column height; LoadoutStrip
-        # claims just enough for its rows.
         self._left_col_split.setStretchFactor(0, 1)
         self._left_col_split.setStretchFactor(1, 0)
-        # LoadoutStrip non-collapsible - sinks to its minimumSizeHint
-        # but never to zero.
         self._left_col_split.setCollapsible(1, False)
-        # Lock the divider between FolderCard and LoadoutStrip - neither
-        # side benefits from a drag.
+        # Locked divider. Neither side benefits from a drag.
         self._left_col_split.handle(1).setEnabled(False)
         self._left_col_split.handle(1).setCursor(QtCore.Qt.ArrowCursor)
 
@@ -392,9 +259,6 @@ class LoadoutPanel(QtWidgets.QWidget):
         self._folder_side_split.setStretchFactor(0, 1)
         self._folder_side_split.setStretchFactor(1, 1)
         self._folder_side_split.setSizes(list(_DEFAULT_FOLDER_SIDE_SPLIT))
-        # Snap-back: when the user releases within ±2.5 % of the 60/40
-        # default, the divider re-anchors. Outside that zone the drag is
-        # free-form.
         self._folder_side_split._snap_ratio = tuple(_DEFAULT_FOLDER_SIDE_SPLIT)
         self._folder_side_split._snap_tolerance = _FOLDER_SIDE_SNAP_TOLERANCE
         self._folder_side_split.splitterMoved.connect(
@@ -404,17 +268,9 @@ class LoadoutPanel(QtWidgets.QWidget):
             lambda *_: maybe_snap_splitter(self._folder_side_split)
         )
 
-        # 3. Discovery block - search/tags strip + grid toolbar (action
-        # row) + grid counter strip as one static unit. Fixed height
-        # (sizeHint clamp) so the splitter cannot squash or stretch it;
-        # the three strips read as one continuous discovery / bulk-action
-        # surface, with the counter strip immediately below the action
-        # row surfacing ambient state.
-        #
-        # The counter strip lives here in the grid toolbar region (not
-        # stacked under the banner): the banner must never overlay the
-        # counters, so it gets its own row below rather than sharing a
-        # ``QStackedLayout(StackAll)`` slot with the counter.
+        # 3. Discovery block - search/tags strip, grid toolbar and
+        # counter strip as one fixed-height unit. The counters sit here
+        # and not under the banner, so the banner never covers them.
         discovery_block = QtWidgets.QWidget(self)
         discovery_block.setObjectName("NSLDiscoveryBlock")
         discovery_block.setSizePolicy(
@@ -427,12 +283,8 @@ class LoadoutPanel(QtWidgets.QWidget):
         discovery_layout.addWidget(self.search_tags)
         discovery_layout.addWidget(self.grid_toolbar)
 
-        # Counters + banner share one horizontal row. Counter chips on
-        # the left at their natural width;
-        # banner fills the right-hand remainder with horizontal stretch.
-        # When the banner is hidden (no pending changes), its layout
-        # space collapses - the chip row stays in place either way
-        # because the chips themselves have no horizontal stretch.
+        # Counters and banner share one row. Only the banner stretches,
+        # so hiding it leaves the chips where they are.
         counters_row = QtWidgets.QWidget(self)
         counters_row.setObjectName("NSLCountersRow")
         counters_row.setSizePolicy(
@@ -442,26 +294,17 @@ class LoadoutPanel(QtWidgets.QWidget):
         counters_row_layout = QtWidgets.QHBoxLayout(counters_row)
         counters_row_layout.setContentsMargins(0, 0, 0, 0)
         counters_row_layout.setSpacing(8)
-        # Strip on the left at its natural width; banner takes the
-        # remaining width to the right edge. All chips (including the
-        # diff +N / −N) live inside the strip in display order, so
-        # the diff chips paint with the same pill chrome as the rest.
         counters_row_layout.addWidget(self.grid_counters)
         counters_row_layout.addWidget(self.banner, 1)
-        # Pin the banner to a fixed slim height so it matches the
-        # group-divider gutter band and never grows the counter row.
-        # Hard-cap at the gutter band height (the same band the sort
-        # group dividers use) so the banner reads as one consistent
-        # strip vocabulary rather than a chunky standalone row.
+        # Cap the banner at the group-divider gutter height so it never
+        # grows the counters row.
         from nsl.ui.grid import GROUP_DIVIDER_HEIGHT as _GUTTER_H
         _banner_h = min(_GUTTER_H, self.grid_counters.sizeHint().height())
         self.banner.setFixedHeight(_banner_h)
         discovery_layout.addWidget(counters_row)
         discovery_section = SectionBox(discovery_block, self)
 
-        # 4. Grid stack - populated grid + empty state. The Banner is
-        # parented to the populated branch (grid_container) so the
-        # stack swap hides it naturally in empty mode.
+        # 4. Grid stack - populated grid and empty state.
         grid_container = QtWidgets.QWidget(self)
         grid_container.setObjectName("NSLGridContainer")
         gc_layout = QtWidgets.QVBoxLayout(grid_container)
@@ -470,17 +313,11 @@ class LoadoutPanel(QtWidgets.QWidget):
         gc_layout.addWidget(self.grid)
         self._grid_container = grid_container
 
-        # Banner lives inline in the counters row above (to the right of
-        # the action buttons), so the grid pane reclaims the strip that
-        # would otherwise host a permanently-reserved banner slot.
+        # The banner sits in the counters row above, not in the grid pane.
         self.banner.hide()
 
-        # Empty-state page - own backdrop painted at the grid bg colour
-        # (#2d2d2d) via setPalette (cascade-safe; QSS on a parent would
-        # pollute child native rendering, per the QSS-cascade lesson).
-        # The EmptyStateWidget itself paints no background. The page is
-        # an ``_EmptyStatePage`` so the empty area paints the same
-        # cell-divider grid lines the populated grid uses.
+        # Backdrop set through the palette, not QSS. QSS on a parent
+        # breaks native rendering in the children.
         self._empty_state_page = _EmptyStatePage(self)
         self._empty_state_page.setObjectName("NSLEmptyStatePage")
         self._empty_state_page.setAutoFillBackground(True)
@@ -497,13 +334,10 @@ class LoadoutPanel(QtWidgets.QWidget):
 
         self._grid_stack = QtWidgets.QStackedWidget(self)
         self._grid_stack.setObjectName("NSLGridStack")
-        self._grid_stack.addWidget(grid_container)         # page 0 - populated
-        self._grid_stack.addWidget(self._empty_state_page) # page 1 - empty
+        # Page 0 is the populated grid. Page 1 is the empty state.
+        self._grid_stack.addWidget(grid_container)
+        self._grid_stack.addWidget(self._empty_state_page)
 
-        # Slot + grid_stack share a single splitter pane so the slot's
-        # fixed height never participates in splitter resize math. The
-        # slot sits at the top of the pane; the grid stack fills the
-        # remainder.
         grid_pane = QtWidgets.QWidget(self)
         grid_pane.setObjectName("NSLGridPane")
         grid_pane_layout = QtWidgets.QVBoxLayout(grid_pane)
@@ -516,9 +350,8 @@ class LoadoutPanel(QtWidgets.QWidget):
         self._vertical_split.setObjectName("NSLVerticalSplit")
         self._vertical_split.setHandleWidth(6)
         self._vertical_split.setChildrenCollapsible(True)
-        # Lock discovery block to its sizeHint (QSizePolicy.Fixed alone is
-        # not enough inside a QSplitter - Qt still hands the pane more
-        # space than sizeHint when leftover height exists).
+        # ``QSizePolicy.Fixed`` is not enough inside a QSplitter. Qt still
+        # gives the pane more than its sizeHint when height is left over.
         discovery_section.adjustSize()
         discovery_section.setFixedHeight(discovery_section.sizeHint().height())
         self._vertical_split.addWidget(self._folder_side_split)
@@ -527,69 +360,46 @@ class LoadoutPanel(QtWidgets.QWidget):
         self._vertical_split.setStretchFactor(0, 1)
         self._vertical_split.setStretchFactor(1, 0)
         self._vertical_split.setStretchFactor(2, 4)
-        # Discovery block non-collapsible (fixed-purpose strip never
-        # sinks below sizeHint). Pair + grid stay collapsible.
         self._vertical_split.setCollapsible(1, False)
-        # Lock the divider below the discovery block (handle index 2):
-        # the discovery block is fixed-height, so the only meaningful
-        # active divider in this splitter is the one above it (handle 1).
+        # Handle 2 is locked. The discovery block is fixed-height, so the
+        # only useful divider here is handle 1, above it.
         self._vertical_split.handle(2).setEnabled(False)
         self._vertical_split.handle(2).setCursor(QtCore.Qt.ArrowCursor)
-        # NOTE: we deliberately do NOT call setSizes here. Stretch
-        # factors + sizeHints give the pair its natural height (so the
-        # folder card and loadout strip are fully readable on first
-        # paint) and let the grid stretch into the leftover. An explicit
-        # setSizes at init forces absolute proportions that squash the
-        # pair at small panel heights. ``reset_panel_layout`` *does*
-        # call setSizes with ``_DEFAULT_VERTICAL_SPLIT`` so the user has
-        # a deterministic "restore" anchor.
+        # Do not call setSizes here. Stretch factors and sizeHints give
+        # the pair its natural height. Absolute sizes squash the pair on
+        # a short panel. ``reset_panel_layout`` does call setSizes.
 
-        # Splitter handle QSS goes on each splitter instance, NOT on
-        # ``self`` - root-level QSS pollutes descendant native paint
-        # (HybridStyle / Fusion QPushButton chrome stops firing).
+        # QSS goes on each splitter, never on ``self``. Root-level QSS
+        # breaks native paint in the children.
         self._folder_side_split.setStyleSheet(HANDLE_QSS)
         self._left_col_split.setStyleSheet(HANDLE_QSS)
         self._vertical_split.setStyleSheet(HANDLE_QSS)
 
         outer.addWidget(self._vertical_split, 1)
 
-        # Floating Close button - direct child of the panel, no
-        # parent layout. Anchored to the bottom-right corner via
-        # :meth:`resizeEvent`. Zero structural footprint (doesn't eat
-        # grid scroll height); reads as a panel-chrome action rather
-        # than a layout-level row. It calls ``self.close()``, which routes
-        # through ``_LoadoutPanelHost.closeEvent`` →
-        # ``nsl.ui.wiring.events.should_close_panel`` - the
-        # SAME guard the window-manager (title-bar) close uses. That guard
-        # checks ``registry.is_active_dirty`` and routes through
-        # ``confirm_close_with_unsaved_changes`` only when the active
-        # Loadout has real edits.
+        # Floating Close button - no parent layout, anchored by
+        # :meth:`resizeEvent`. ``self.close()`` runs the same
+        # unsaved-changes guard as the title-bar close.
         self.close_button = QtWidgets.QPushButton("Close", self)
         self.close_button.setObjectName("NSLCloseButton")
         self.close_button.setAutoDefault(False)
         self.close_button.setDefault(False)
-        # Raise above the splitter children so it always renders on
-        # top of whichever pane sits in the bottom-right slot.
         self.close_button.raise_()
         self._reposition_close_button()
 
-        # Empty-state gating - wire after the stack exists. Folder count
-        # drives which page is current.
         self.folder_card.remove_confirmed.connect(
             lambda *_: self._refresh_grid_stack()
         )
-        # First-paint sync so the stack reflects whatever entries the
-        # caller seeded on the folder card before _build_main ran.
+        # Sync now, in case the caller seeded folder entries already.
         self._refresh_grid_stack()
 
-        # Pin the 60/40 horizontal split until the user drags. Qt
-        # re-normalises ``setSizes`` against child sizeHints, so the
-        # construction-time call alone drifts.
+        # Qt re-normalises ``setSizes`` against child sizeHints, so the
+        # call above drifts. ``resizeEvent`` re-applies 60/40 until the
+        # user drags the divider.
         self._folder_side_user_dragged = False
 
     def _on_folder_side_moved(self, *args) -> None:
-        """Mark the folder/side divider as user-controlled so subsequent
-        panel resizes stop forcing the 60/40 default."""
+        """Mark the divider user-controlled so resizes stop forcing 60/40."""
         self._folder_side_user_dragged = True
 
     # ------------------------------------------------------------------
@@ -599,26 +409,16 @@ class LoadoutPanel(QtWidgets.QWidget):
     def _reposition_close_button(self) -> None:
         """Anchor the floating Close button to the bottom-right corner.
 
-        Called from :meth:`_build_main` on first paint and from
-        :meth:`resizeEvent` on every resize. The button's natural
-        ``sizeHint`` drives its width/height; we just translate it
-        into the corner with an 8 px vertical margin (matches the
-        panel's outer-layout margin so the button sits flush with
-        the rest of the chrome) and a wider right margin so the
-        button clears the populated PluginsGrid's vertical
-        scrollbar. Positioning the button left of the scrollbar is the
-        clean fix: shrinking the scrollbar (``setViewportMargins`` +
-        parent layout bottom-padding) had no visual effect under Nuke's
-        HybridStyle and left an ugly bottom gutter on the grid.
+        The right margin is wider than the chrome margin so the button
+        clears the grid's vertical scrollbar.
         """
         btn = getattr(self, "close_button", None)
         if btn is None:
             return
         hint = btn.sizeHint()
         bottom_margin = 8
-        # Scrollbar ~16 px wide on macOS HybridStyle + ~8 px breathing
-        # gap between scrollbar and button right edge = 24 px additional
-        # right-side inset beyond the standard 8 px chrome margin.
+        # 16 px for the scrollbar plus an 8 px gap, on top of the 8 px
+        # chrome margin.
         right_margin = 8 + 24
         x = self.width() - hint.width() - right_margin
         y = self.height() - hint.height() - bottom_margin
@@ -626,13 +426,9 @@ class LoadoutPanel(QtWidgets.QWidget):
 
     def showEvent(self, event):  # noqa: N802 - Qt override
         super().showEvent(event)
-        # Capture the actual splitter sizes Qt produced for the
-        # construction-time layout on the *first* show. We can't read
-        # ``splitter.sizes()`` during ``__init__`` because the widget has
-        # no rendered geometry yet - Qt would return zeros or the raw
-        # ``setSizes`` requests pre-normalisation. ``showEvent`` fires
-        # after Qt's first layout pass, so ``sizes()`` returns real
-        # pixel allocations.
+        # ``sizes()`` returns zeros during ``__init__``. The first
+        # ``showEvent`` runs after Qt's first layout pass, so it reads
+        # the real pixel sizes.
         if not getattr(self, "_default_sizes_captured", False):
             try:
                 folder_sizes = self._folder_side_split.sizes()
@@ -640,11 +436,8 @@ class LoadoutPanel(QtWidgets.QWidget):
             except AttributeError:
                 folder_sizes = []
                 vertical_sizes = []
-            # Only commit the capture if Qt has handed us non-zero
-            # numbers - otherwise we'd freeze a degenerate layout into
-            # the Reset target. The ``showEvent`` may fire again on
-            # re-show; the captured flag keeps us from clobbering the
-            # initial values once we have a good read.
+            # Commit only a non-zero read, or Reset would restore a
+            # broken layout. The flag stops a later show overwriting it.
             if all(s > 0 for s in folder_sizes) and all(
                 s > 0 for s in vertical_sizes
             ):
@@ -654,14 +447,10 @@ class LoadoutPanel(QtWidgets.QWidget):
 
     def resizeEvent(self, event):  # noqa: N802 - Qt override
         super().resizeEvent(event)
-        # Floating Close button - re-anchor to the bottom-right corner
-        # whenever the panel resizes.
         self._reposition_close_button()
-        # Re-apply 60/40 on every resize until the user drags the
-        # divider. ``Reset panel`` clears the flag so the default
-        # returns mid-session. The pair lives nested inside the
-        # vertical split; read the vertical split's width because the
-        # pair's own width is stale during the outer resize event.
+        # Re-apply 60/40 until the user drags. Read the width off the
+        # vertical split, because the pair's own width is stale during
+        # the outer resize event.
         if (
             not getattr(self, "_folder_side_user_dragged", True)
             and getattr(self, "_folder_side_split", None) is not None
@@ -682,60 +471,38 @@ class LoadoutPanel(QtWidgets.QWidget):
     # ----- empty-state gating ---------------------------------------------
 
     def _refresh_grid_stack(self) -> None:
-        """Pick the populated-vs-empty page based on discovered plugin count.
+        """Pick the populated or the empty page from the grid key count.
 
-        Empty-state trigger: replace the grid
-        region with the welcome message ONLY when there are zero
-        Plugins to show - i.e. neither user-added folders NOR the
-        Global layer have contributed any discovered Plugins. Global
-        Plugins (from the ``<nsl_root>/Global/`` folder convention
-        and/or ``NSL_GLOBAL_PLUGIN_DIRS``) keep the panel populated
-        even when ``user_plugins_dirs`` is empty.
-
-        Keyed on the actual grid key count (the union of user-added +
-        Global after discovery merges), not ``folder_card.row_count()``
-        which counts only user-added folders - with a Global layer
-        configured and no user folders, the row count would wrongly
-        show the empty-state page even though plugins were discovered.
+        Keyed on the grid keys, not ``folder_card.row_count()``. A
+        Global layer with no user folders still fills the grid, and a
+        row count would wrongly show the empty page.
         """
         has_plugins = len(self.grid.keys()) > 0
         page = 0 if has_plugins else 1
         if self._grid_stack.currentIndex() != page:
             self._grid_stack.setCurrentIndex(page)
-        # First-run affordance on Add Plugins Folder - ON when the
-        # grid is empty (no plugins from any source), OFF otherwise.
-        # Same trigger handles initial first-run AND mid-session
-        # return-to-empty when the user removes their last folder.
         self.folder_card.set_first_run_affordance(not has_plugins)
 
     def refresh_grid_stack(self) -> None:
-        """Public hook for the wiring layer to re-evaluate the stack page
-        after a programmatic ``folder_card.set_entries(...)`` call.
+        """Public hook for the wiring layer to re-evaluate the stack page.
 
-        FolderCard does not emit an "entries-changed" signal for
-        programmatic updates (only ``remove_confirmed`` for in-card
-        removes and ``add_folder_requested`` for the Add button), so
-        anyone who replaces the entries list externally should call
-        this to keep the stack in sync.
+        FolderCard emits no signal for a programmatic
+        ``set_entries(...)``, so the caller must call this itself.
         """
         self._refresh_grid_stack()
 
     # ----- public API the wiring layer uses --------------------------------
 
     def rebuild_grid(self, keys, pill_factory=None) -> None:
-        """Replace the grid contents with a new key list + factory.
+        """Replace the grid contents with a new key list and factory.
 
-        Used by the wiring layer to repopulate the grid when the active
-        Loadout changes. Splitter sizes and collapsed states are NOT
-        affected (the new grid takes the existing grid's slot).
+        Splitter sizes and collapsed states are not affected.
         """
         if pill_factory is None:
             pill_factory = self._pill_factory
         else:
             self._pill_factory = pill_factory
 
-        # Replace the grid in its parent column. We hold a reference to
-        # the grid's parent layout to swap it cleanly.
         old_grid = self.grid
         parent = old_grid.parentWidget()
         layout = parent.layout() if parent is not None else None
@@ -745,36 +512,18 @@ class LoadoutPanel(QtWidgets.QWidget):
         old_grid.setParent(None)
         old_grid.deleteLater()
         self.grid = new_grid
-        # Re-connect info-bar selection sync; the signal is on the new
-        # grid instance.
         try:
             new_grid.selection_changed.connect(self._on_grid_selection_changed)
         except AttributeError:
             pass
 
     def reset_panel_layout(self) -> None:
-        """Restore default splitter ratios, side panel tab, AND clear
-        in-panel session state (filters, selection, sort).
+        """Restore the default layout and clear in-panel session state.
 
-        Wired to :attr:`TopToolbar.reset_panel_requested` in
-        :meth:`_wire_signals`. Touches splitter geometry, the side
-        panel's active tab, the search/tags filter, the pill
-        selection, and the sort dropdown. **Never** touches domain
-        state - Loadouts, Plugins Folders, the dirty flag, undo
-        history, and saved baselines all stay intact.
-
-        Beyond layout (splitter sizes + side panel tab), Reset also wipes
-        transient in-panel session state: it clears filters, deselects all
-        pills, and resets sort to A→Z.
-
-        Idempotent at default: when no filter is active, no pills are
-        selected, and sort is already A→Z, the session-state branches
-        each early-return / no-op. Likewise for layout - once
-        :meth:`showEvent` has captured Qt's actual first-paint sizes,
-        Reset replays them via ``setSizes`` directly, so at the default
-        layout the splitters are already at those sizes and nothing
-        moves. The ratio-based path is kept as a fallback for the rare
-        case where ``showEvent`` never fires (off-screen consumers).
+        Splitter sizes, the side panel tab, the filter, the pill
+        selection and the sort mode. It never touches domain state.
+        Every branch is a no-op when already at its default, so Reset
+        at the default layout changes nothing.
         """
         if getattr(self, "_default_sizes_captured", False):
             self._folder_side_split.setSizes(
@@ -784,8 +533,7 @@ class LoadoutPanel(QtWidgets.QWidget):
                 list(self._default_vertical_sizes)
             )
         else:
-            # No showEvent capture yet - fall back to ratio math against
-            # the cached construct-time tuples.
+            # No showEvent capture yet, so fall back to ratio math.
             self._apply_split_by_ratio(
                 self._folder_side_split,
                 self._default_folder_side_sizes,
@@ -796,33 +544,24 @@ class LoadoutPanel(QtWidgets.QWidget):
                 self._default_vertical_sizes,
                 horizontal=False,
             )
-        # Re-arm the folder/side auto-centre so subsequent resizes lock to
-        # the 60/40 default again until the user drags the divider next.
+        # Re-arm the 60/40 lock until the user drags again.
         self._folder_side_user_dragged = False
-        # Restore the side panel's default active tab.
         self.side_panel.tabs.setCurrentIndex(self._default_side_panel_tab_index)
 
-        # Clear transient session state. Order matters slightly:
-        # deselect first so the subsequent sort/filter rebuilds don't
-        # re-emit a stale selection through the bridge.
+        # Deselect first, so the sort and filter rebuilds below do not
+        # re-emit a stale selection.
         try:
             grid = getattr(self, "grid", None)
             if grid is not None and hasattr(grid, "clear_selection"):
                 grid.clear_selection()
         except Exception:  # noqa: BLE001 - reset must not raise on any one branch
             pass
-        # Clear filters (search text + invert toggle). The strip's
-        # ``clear_filter`` is idempotent when both are already at
-        # defaults so this is a no-op when no filter is active.
         try:
             search_tags = getattr(self, "search_tags", None)
             if search_tags is not None and hasattr(search_tags, "clear_filter"):
                 search_tags.clear_filter()
         except Exception:  # noqa: BLE001
             pass
-        # Reset the sort dropdown to A → Z. ``set_sort_mode`` is a
-        # no-op when the dropdown is already on A → Z (Qt's
-        # ``setCurrentText`` short-circuits when the text is unchanged).
         try:
             from nsl.ui.grid_toolbar import SortMode
             grid_toolbar = getattr(self, "grid_toolbar", None)
@@ -830,12 +569,8 @@ class LoadoutPanel(QtWidgets.QWidget):
                 grid_toolbar.set_sort_mode(SortMode.A_TO_Z)
         except Exception:  # noqa: BLE001
             pass
-        # Restore every folder card eye icon to visible. Clear the
-        # registry's visibility map (missing keys default to True in
-        # ``folder_list_from``) AND mirror the change into the filter
-        # pipeline so the grid re-shows pills from any folder that
-        # had been eye-toggled off. A single ``_refresh`` at the end
-        # propagates both through ``refresh_from_registry``.
+        # Restore every folder card eye to visible. Clear the registry
+        # map and the filter pipeline, then refresh once.
         try:
             registry = getattr(self, "registry", None)
             if registry is not None and hasattr(registry, "_folder_visibility"):
@@ -856,13 +591,10 @@ class LoadoutPanel(QtWidgets.QWidget):
         *,
         horizontal: bool,
     ) -> None:
-        """Apply *ratios* to *splitter* scaled against its current dimension.
+        """Apply *ratios* to *splitter*, scaled to its current size.
 
-        Qt's ``setSizes`` re-normalises against the splitter's actual
-        width / height, but only when the supplied total is non-trivial
-        relative to current size - otherwise stretch factors take over
-        and pad unevenly. Multiplying each ratio against the current
-        dimension lands the requested proportions deterministically.
+        A bare ``setSizes`` lets the stretch factors take over and pad
+        unevenly. Scaling each ratio to the current size is exact.
         """
         total = splitter.width() if horizontal else splitter.height()
         if total <= 0:
@@ -877,42 +609,28 @@ class LoadoutPanel(QtWidgets.QWidget):
     def _wire_signals(self) -> None:
         """Connect intra-panel signals.
 
-        The one panel-internal signal wired here is the Reset panel
-        button to :meth:`reset_panel_layout`. The per-widget
-        ``wire_<module>(self)`` helpers (each connecting one widget's
-        outbound signals to the right domain module) are called in the
-        block below, between the ``# === BEGIN P5 WIRING ===`` /
-        ``# === END P5 WIRING ===`` markers.
+        The ``wire_<module>(self)`` helpers run in the P5 block below.
         """
-        # Intra-panel wiring - Reset panel restores layout defaults.
         self.top_toolbar.reset_panel_requested.connect(self.reset_panel_layout)
 
-        # Grid selection updates the info bar's Selected counter without
-        # a full refresh round-trip.
         try:
             self.grid.selection_changed.connect(self._on_grid_selection_changed)
         except AttributeError:
             pass
 
-        # Panic-button cross-wire: the visible panic control lives in the
-        # top toolbar, but the existing ``panic_toggled`` signal source on
-        # ``loadout_strip`` is the contract the wiring layer + tests use.
-        # Forward the top-toolbar toggle into loadout_strip.btn_panic so
-        # loadout_strip.panic_toggled fires for downstream consumers.
+        # The visible panic control is in the top toolbar, but
+        # ``loadout_strip.panic_toggled`` is the contract downstream.
         self.top_toolbar.panic_toggled.connect(
             self.loadout_strip.btn_panic.setChecked
         )
-        # Reverse: keep the top-toolbar button in sync if anyone calls
-        # loadout_strip.set_panic_engaged() (e.g. tests or domain reset).
+        # Reverse, so ``loadout_strip.set_panic_engaged`` moves the button.
         self.loadout_strip.btn_panic.toggled.connect(
             self.top_toolbar.set_panic_engaged
         )
 
         # === BEGIN P5 WIRING ===
-        # Production path: registry attached → wiring must succeed.
-        # No-registry path: registry is None → wiring may noop on missing
-        # state, so we wrap in a try/except that surfaces the trace but
-        # never blocks construction.
+        # With no registry the wiring may fail on missing state. Print
+        # the trace and let construction finish.
         from nsl.ui.wiring.events import wire_events
         from nsl.ui.selection import wire_selection
         from nsl.ui.sort import build_key_to_folder, wire_sort
@@ -930,19 +648,13 @@ class LoadoutPanel(QtWidgets.QWidget):
                 wire_events(self)
                 wire_selection(self)
                 wire_sort(self)
-                # Pass ``build_key_to_folder`` so folder-eye toggles
-                # actually filter pills (previously the default-None
-                # mapping made the eyes record state without
-                # hiding anything).
+                # Without ``key_to_folder`` the folder eyes record state
+                # but hide nothing.
                 wire_filter_pipeline(
                     self, key_to_folder=build_key_to_folder(self)
                 )
-                # Production state lookup - wires the sort dropdown's
-                # five non-alpha modes (Status / Selected / Changed
-                # state / Warnings / Folder of origin) to live registry
-                # + grid + folder-card data. MUST come AFTER
-                # ``wire_filter_pipeline`` because it pushes the lookup
-                # into the pipeline.
+                # Must come after ``wire_filter_pipeline``. It pushes the
+                # sort state lookup into the pipeline.
                 wire_sort_state_lookup(self)
                 wire_provenance(self)
                 wire_status_routing(self)
@@ -972,24 +684,11 @@ class LoadoutPanel(QtWidgets.QWidget):
     # ----- registry-driven refresh ---------------------------------------
 
     def refresh_from_registry(self) -> None:
-        """Re-emit widget state from ``self.registry`` after a domain mutation.
+        """Re-emit widget state from ``self.registry`` after a mutation.
 
-        Called by :meth:`Registry.apply_op_result` (via the attached
-        ``refresh_callback``) and once at construction so the panel
-        boots populated. Reads pure state-derivation helpers in
-        :mod:`nsl.ui.state` and pushes the result into each region's
-        existing setter API - no widget-internal poking.
-
-        Refreshed regions:
-            * Loadout strip - dropdown contents + active row + dirty flag.
-            * Folder card - entries from settings.user_plugins_dirs.
-            * Banner - pending count + kind (hidden when count == 0).
-            * Grid stack - page swap to empty-state when no folders are
-              configured.
-            * Plugins grid - rebuilt against the union of active +
-              global plugin names so loadout switch repopulates pills.
-              Re-runs ``rewire_grid_pills`` so the new pills carry
-              signal connections.
+        Called by :meth:`Registry.apply_op_result` and once at
+        construction. Reads the helpers in :mod:`nsl.ui.state` and
+        pushes the result through each region's own setter.
 
         No-op when ``self.registry`` is None.
         """
@@ -998,58 +697,27 @@ class LoadoutPanel(QtWidgets.QWidget):
 
         registry = self.registry
 
-        # Panic mode disables most of the panel. When panic is engaged,
-        # user-added Plugins are held; the panel UX reflects that by
-        # greying out everything
-        # except the loadout strip (so saves still work), the side
-        # panel tabs (Summary/Info/Log remain inspectable), and the
-        # top toolbar (so the panic button itself stays clickable to
-        # disengage).
+        # Panic greys most of the panel. The loadout strip, top toolbar
+        # and side panel stay enabled, so Save and release still work.
         panic_engaged = bool(getattr(registry.state, "panic", False))
-        # Panic dim flows through the folder card's per-row setter, not a
-        # blanket ``setEnabled``: the card stays interactive (Add / Rescan
-        # keep working); user-added rows dim + strike through to read as
-        # "ignored on next restart"; the pinned Global Plugins row stays
-        # fully painted because the Global layer keeps loading regardless of
-        # panic (panic drops user plugins only, never Globals). This keeps
-        # it clear that non-Global folders are ignored while Globals remain.
+        # A per-row setter, not a blanket ``setEnabled``. Add and Rescan
+        # keep working, and the Global row stays lit because Global
+        # plugins still load in panic.
         self.folder_card.set_panic_engaged(panic_engaged)
-        # The grid itself stays enabled in panic so info buttons remain
-        # clickable on every pill (user can still
-        # inspect plugin info mid-panic). Each pill self-gates its
-        # mutating zones (body toggle, GUI chip) on
-        # ``PillState.panic_engaged + source == USER_ADDED`` in
-        # :meth:`PluginPill.mousePressEvent`. GLOBAL pills stay
-        # fully interactive - Globals still load in panic. The
-        # per-pill opacity overlay (``_apply_panic_grid_visual``) +
-        # disabled grid_toolbar carry the "non-actionable for user
-        # plugins" visual signal.
+        # The grid stays enabled so the info buttons still work. Each
+        # pill gates its own toggle zones on ``PillState.panic_engaged``
+        # and USER_ADDED.
         self.grid_toolbar.setEnabled(not panic_engaged)
         self.search_tags.setEnabled(not panic_engaged)
-        # Push panic state to the top-toolbar's panic button too - the
-        # saved settings flag reaches the folder card / grid / banner /
-        # pills on panel reopen, but without this push the button itself
-        # stays unchecked. With ``settings.panic=True`` on disk that
-        # produced a panel where the banner said "Panic engaged" and the
-        # grid was greyed out but the button read "Panic Mode: Disable
-        # All User Plugins", making panic look like it didn't persist
-        # across close+reopen. ``set_panic_engaged`` is the no-emit setter
-        # so the cross-wire to ``loadout_strip.btn_panic`` doesn't
-        # round-trip into ``_on_panic_toggled`` and re-write disk.
+        # Push panic to the top-toolbar button too. Without it a panel
+        # reopened with panic saved shows a grey grid and an unchecked
+        # button. ``set_panic_engaged`` does not emit, so nothing loops
+        # back into ``_on_panic_toggled``.
         self.top_toolbar.set_panic_engaged(panic_engaged)
         self.loadout_strip.set_panic_engaged(panic_engaged)
-        # loadout_strip, top_toolbar, side_panel remain enabled.
 
-        # Qt's setEnabled(False) is too subtle on the custom-painted
-        # pills (they keep their own colours), so layer a translucent
-        # overlay on the grid to make the disabled state read at a
-        # glance. The treatment greys only USER_ADDED pills and leaves
-        # GLOBAL coloured (see :meth:`_apply_panic_grid_visual`).
         self._apply_panic_grid_visual(panic_engaged)
 
-        # Loadout strip - name list + active + dirty flag. ``dirty_stems``
-        # surfaces ``(*)`` on non-active rows whose dirty in-memory model
-        # is parked in :attr:`Registry._pending_models`.
         has_global_layer = bool(
             registry.global_model and registry.global_model.plugins
         )
@@ -1067,12 +735,6 @@ class LoadoutPanel(QtWidgets.QWidget):
         self.loadout_strip.set_loadouts(loadouts, active=active_name)
         self.loadout_strip.set_dirty(registry.is_active_dirty)
 
-        # Folder card - paths + visibility + health, plus the
-        # synthetic Global Plugins row (pinned-to-bottom) when a
-        # Global layer is resolved. A Global layer with no user folders
-        # would otherwise leave the card empty and read as misleading;
-        # ``folder_list_from`` appends the synthetic row when
-        # ``global_model`` carries plugins.
         global_dirs = list(
             getattr(registry, "global_plugin_dirs", []) or []
         )
@@ -1085,58 +747,27 @@ class LoadoutPanel(QtWidgets.QWidget):
         )
         self.folder_card.set_entries(folder_entries)
 
-        # Empty-state page swap - triggered only when there are zero
-        # pills to show. Uses the same union
-        # the grid is rebuilt against below (``_plugin_key_union``),
-        # which spans three sources: scanner-discovered plugins, the
-        # active Loadout's plugins, AND the resolved Global model.
-        # Global-only first run has ``user_plugins_dirs=[]`` (no
-        # discovered plugins) but ``global_model.plugins`` carries the
-        # Global layer's Octopus/Otter/Penguin - those keys land in the
-        # union, the grid renders 3 pills, and the welcome page stays
-        # hidden. Keyed on the canonical pill-key union (what the grid
-        # actually builds): a user-folder count would miss Global-
-        # only first runs, and a discovered-plugin count would miss
-        # Global contributions (the scanner runs on user dirs only).
         empty = len(_plugin_key_union(registry)) == 0
-        # Custom honesty: compute
-        # whether the active loadout is the in-memory Custom slot.
-        # Threaded into ``pill_state_from`` (force-dirty path) and the
-        # banner state machine (forces PENDING_CHANGES voice) so the
-        # committed-pending vocabulary (lime/red border, saved-glow,
-        # "Saved Change" banner copy) never paints on a slot that
-        # can't commit. See state.py for the per-pill effect.
+        # Custom cannot commit, so the saved-change visuals must not
+        # paint on it. This flag reaches ``pill_state_from`` and the
+        # banner. See state.py for the per-pill effect.
         from nsl.constants import DEFAULT_CUSTOM_LOADOUT_STEM as _CUSTOM_STEM
         active_is_custom = (
             registry.state is not None
             and registry.state.active == _CUSTOM_STEM
         )
         self._grid_stack.setCurrentIndex(1 if empty else 0)
-        # Mirror the affordance flip ``_refresh_grid_stack`` does -
-        # this refresh path bypasses it but must keep the orange
-        # first-run border invariant in sync. Without this, adding the
-        # first folder swaps the stack page but leaves the border on
-        # because ``refresh_from_registry`` is the canonical "I just
-        # processed the registry" path called by the wiring layer
-        # after a folder add, and it doesn't route through
-        # ``_refresh_grid_stack``.
+        # This path never calls ``_refresh_grid_stack``, so flip the
+        # first-run border here too.
         self.folder_card.set_first_run_affordance(empty)
 
-        # Search/Tags strip - show/hide the "Reset Global Plugins to
-        # Default" button based on whether a Global layer is currently
-        # active for this session. The button is hidden entirely (not
-        # disabled) when no Global layer resolves; the rule is that the
-        # affordance does not appear when there's nothing to reset
-        # against. It lives on the controls row beside the
-        # Select-filtered / Deselect-filtered / Clear-selection buttons.
+        # The Reset Global Plugins button is hidden, not disabled, when
+        # no Global layer resolves.
         global_layer_active = bool(
             registry.global_model is not None
             and registry.global_model.plugins
         )
         self.search_tags.set_global_layer_active(global_layer_active)
-        # Reset Global Plugins to Default - enabled only when at least
-        # one Global Plugin in the active Loadout has actually
-        # drifted from its Global default.
         if hasattr(self.search_tags, "set_reset_global_enabled"):
             diverged = 0
             if hasattr(registry, "count_diverged_global_plugins"):
@@ -1146,24 +777,9 @@ class LoadoutPanel(QtWidgets.QWidget):
                     diverged = 0
             self.search_tags.set_reset_global_enabled(diverged > 0)
 
-        # Side panel ▸ Summary - surface the session-load truth so the
-        # user can read which plugins NSL actually loaded this session
-        # and predict the diff signal a toggle will produce. Without
-        # this surface the panel UI never showed *which* plugins were
-        # loaded; the only way to see a RED tint (= disabled but was
-        # loaded this session) is to know which pills were successfully
-        # loaded by NSL's boot pass, then toggle one of those off. This
-        # surface answers "which plugins are pre-loaded".
         try:
-            # Use the ``empty`` flag computed at the grid-stack swap
-            # above - not ``self.grid.keys()``. This refresh
-            # path sets the summary BEFORE rebuilding the grid further
-            # down, so ``self.grid.keys()`` here would still be the
-            # pre-refresh set (empty on first folder add → state 1 copy
-            # would wrongly stick even after the new pills appear). The
-            # canonical ``_plugin_key_union(registry)`` already drove
-            # ``empty``; re-using it keeps the empty-page swap, the
-            # first-run border, and the summary body in lock-step.
+            # Use ``empty``, not ``self.grid.keys()``. The grid is
+            # rebuilt further down, so its keys are still the old set.
             self.side_panel.set_summary(
                 _session_summary_html(
                     grid_has_pills=not empty, registry=registry
@@ -1173,58 +789,23 @@ class LoadoutPanel(QtWidgets.QWidget):
         except Exception:  # noqa: BLE001 - summary update must not break refresh
             pass
 
-        # Banner - count + kind derived from pending_diff against the
-        # session-loaded baseline (what NSL actually loaded at boot;
-        # see :attr:`Registry.session_loaded_baseline`). The comparison
-        # is against the baseline loaded this Nuke session, not against
-        # another loadout. Switching the active loadout does not change
-        # the baseline - only the current side of the comparison - so the
-        # banner correctly reflects "what will load on restart different
-        # from what's loaded right now in this session."
-        #
-        # Diff current-side = active overlaid on Global (sparse-diff
-        # resolution). When the active model
-        # is missing a Global key (e.g. after
-        # ``reset_global_to_default`` empties Custom's plugins dict),
-        # Global fallback resolution keeps the effective state stable;
-        # comparing raw ``active.plugins`` would falsely surface the
-        # absent keys as pending removes (e.g. changing one Global
-        # plugin would report a phantom -N after a Global reset).
         current_for_diff = registry.resolved_active_for_diff
         diff = pending_diff(
             current_active=current_for_diff,
             saved_baseline=registry.session_loaded_baseline,
         )
-        # Empty-state suppression - when
-        # the grid stack is on the empty-state page (no folders
-        # configured), the banner does not appear. The banner lives in
-        # the counters row rather than the populated grid subtree, so
-        # show() is gated on the stack page explicitly.
+        # The banner is not inside the grid subtree, so hide it here
+        # when the empty page is showing.
         empty_page = self._grid_stack.currentIndex() == 1
-        # Banner selection priority:
-        #   1. PANIC_ENGAGED - always wins when panic is on. Count
-        #      slot unused; the message is the binary "restart will
-        #      skip user plugins" signal.
-        #   2. (hidden) - ``diff.count == 0``. The banner is strictly a
-        #      "N changes pending a Nuke restart" signal; when nothing is
-        #      pending it disappears. Unsaved in-memory edits that happen
-        #      to cancel out the session-loaded diff (e.g. save a disable,
-        #      then re-enable) are signalled by the (*) marker + the lit
-        #      Save button - NOT by a "0 pending changes" banner. The
-        #      banner never says "0 pending changes"; it disappears
-        #      instead.
-        #   3. PENDING_CHANGES - count > 0 AND (in-memory edits unsaved,
-        #      OR Custom active - Custom never commits; the voice is
-        #      "Save As to promote").
-        #   4. SAVED_AWAITING_RESTART - count > 0 AND clean on disk
-        #      (Save fired). Only a Nuke restart is left.
+        # Banner state, in priority order:
+        #   1. PANIC_ENGAGED          - panic wins. The count is unused.
+        #   2. hidden                 - count is 0. It never says "0".
+        #   3. PENDING_CHANGES        - count > 0 and dirty, or Custom.
+        #   4. SAVED_AWAITING_RESTART - count > 0 and clean on disk.
         if empty_page:
             self.banner.hide()
         elif panic_engaged:
-            # Append the "Only Global Plugins will be loaded." sentence
-            # only when a Global Loadout is actually configured (resolved
-            # global_model has plugins). No Global -> the banner stays the
-            # plain "all User Plugins will be skipped." statement.
+            # The Global-plugins sentence needs a resolved Global layer.
             gm = getattr(registry, "global_model", None)
             globals_present = bool(gm is not None and gm.plugins)
             self.banner.set_state(
@@ -1239,45 +820,31 @@ class LoadoutPanel(QtWidgets.QWidget):
             self.banner.show()
             self.banner.raise_()
         else:
-            # count > 0 AND clean on disk → saved, awaiting restart.
             self.banner.set_state(BannerKind.SAVED_AWAITING_RESTART, diff.count)
             self.banner.show()
             self.banner.raise_()
 
-        # Plugins grid - rebuild against the current key union. Only
-        # re-run pill signal wiring when a rebuild actually happened;
-        # rewire_grid_pills connects new lambdas each call so calling
-        # it on a no-op set_keys would stack duplicate connections.
-        #
-        # Also stash the master key list on the panel so the filter
-        # pipeline can rebuild against it (rather than against
-        # grid.keys(), which after filter is itself the filtered subset).
+        # ``rewire_grid_pills`` connects new lambdas on each call, so it
+        # runs only after a real rebuild. The master key list is stashed
+        # for the pipeline, because ``grid.keys()`` is the filtered set.
         new_keys = _plugin_key_union(registry)
         self._all_plugin_keys = list(new_keys)
 
-        # Grid counter strip. Reads counts off the same diff math the
-        # banner uses so the two never disagree.
-        # ``pending_diff_split`` returns (add, del) - pills that will
-        # load vs unload on next Save.
+        # The counters read the same diff math as the banner, so the two
+        # never disagree.
         selected_count = 0
         try:
             selected_count = len(self.grid.selected_keys())
         except Exception:  # noqa: BLE001 - counter strip is informational only.
             selected_count = 0
-        # Same Global-active fallback as the banner - see above.
         pending_add, pending_del = pending_diff_split(
             current_active=current_for_diff,
             saved_baseline=registry.session_loaded_baseline,
         )
         gui_only_count = _count_gui_only(current_for_diff)
-        # Loaded chip - fixed count of plugins NSL loaded this session
-        # (boot-time manifest). Counts the session total, not the
-        # visible intersection, so it does not change with grid filtering
-        # or a mid-session folder delete.
         loaded_session = self._count_loaded_session()
-        # Logs chip = problematic Plugins (load failures + missing). The
-        # registry has no failure-count surface yet; show 0 until that
-        # wiring lands.
+        # The Logs chip counts problem Plugins. There is no failure
+        # surface yet, so the argument below stays 0.
         self.grid_counters.set_counters(
             selected_count,
             len(new_keys),
@@ -1287,29 +854,15 @@ class LoadoutPanel(QtWidgets.QWidget):
             0,
             loaded_session,
         )
-        # Route through the filter pipeline whenever it exists, NOT
-        # just when a filter query is active. The pipeline composes
-        # filter + sort in one pass; ``_plugin_key_union`` returns
-        # the master list in A→Z order regardless of which sort the
-        # user picked, so a bare ``set_keys(new_keys)`` here would
-        # silently reset the grid to A→Z on every refresh. Symptom:
-        # toggling a pill while Z→A is active caused the grid to
-        # rebuild in A→Z order, making the pill at the cursor
-        # appear to "change name" because a different plugin's pill
-        # now occupies that position. Sort is visibility-only - it
-        # reorders pills and must never disturb toggling or pill
-        # identity.
+        # Always route through the pipeline, even with no filter query.
+        # ``_plugin_key_union`` returns A to Z, so a bare ``set_keys``
+        # here would reset the user's sort on every refresh.
         pipeline = getattr(self, "filter_pipeline", None)
-        # Guard: _apply_visibility re-pushes pill states after any
-        # rebuild it performs. During a full refresh that push is
-        # redundant - this method pushes right below, against the same
-        # rebuilt grid - so flag the window and let the pipeline skip.
+        # ``_apply_visibility`` re-pushes pill states after a rebuild.
+        # This method pushes below anyway, so let the pipeline skip it.
         self._in_registry_refresh = True
         try:
             if pipeline is not None:
-                # Pipeline will call _apply_visibility which calls
-                # set_keys with the filter+sort-composed key list, then
-                # rewires pills.
                 pipeline._recompute_and_apply()
             elif self.grid.set_keys(new_keys):
                 from nsl.ui.wiring.events import rewire_grid_pills
@@ -1318,33 +871,21 @@ class LoadoutPanel(QtWidgets.QWidget):
         finally:
             self._in_registry_refresh = False
 
-        # Push fresh PillState + cell diff-tints + panic dim onto the
-        # (possibly rebuilt) grid. Extracted to
-        # ``_set_pills_from_registry`` so the filter/sort pipeline can
-        # invoke the same pass after its own rebuilds.
         self._set_pills_from_registry()
 
-        # Keep top-toolbar Undo/Redo in sync with the active stack on
-        # every refresh, not just wiring-layer ops. Without
-        # this, a registry mutation that bypasses `_toggle_plugin`
-        # (loadout switch, external apply_op_result) leaves the toolbar's
-        # enabled state stale.
         from nsl.ui.wiring.events import _sync_undo_toolbar
 
         _sync_undo_toolbar(self)
 
 
     def _set_pills_from_registry(self) -> None:
-        """Recompose and push per-pill visual state onto the current grid.
+        """Recompose and push per-pill visual state onto the grid.
 
-        One pass over the visible pills: replay ``pill_state_from`` for
-        every key (body tint, borders, chips), mirror the pending-restart
-        signal onto each cell's diff-tint wash, and re-apply the panic
-        dim. Called from ``refresh_from_registry`` after every registry
-        mutation AND from the filter pipeline's ``_apply_visibility``
-        after any grid rebuild - ``grid.set_keys`` tears down pills and
-        cells, and while the pill factory re-mints correct PillStates,
-        the cell washes and panic opacity exist only through this push.
+        One pass over the visible pills: replay ``pill_state_from``,
+        mirror the pending-restart signal onto the cell diff-tint, and
+        re-apply the panic dim. The filter pipeline calls this after its
+        own rebuilds, because only this pass sets the cell washes and
+        the panic opacity.
         """
         registry = self.registry
         if registry is None:
@@ -1357,25 +898,9 @@ class LoadoutPanel(QtWidgets.QWidget):
             registry.state is not None
             and registry.state.active == _CUSTOM_STEM
         )
-        # *Push fresh PillState to every existing pill.*
-        # ``set_keys`` only fires the factory when the key list itself
-        # changed (a plugin appeared or disappeared); a pill toggle
-        # flips an ``enabled`` flag but keeps the same key set, so
-        # ``set_keys`` short-circuits and existing pills keep the
-        # PillState the factory minted at construction - stale enabled
-        # flag, stale tint, stale selected, stale gui_only. That's why
-        # pill body tints "stopped working" after a toggle: the
-        # canonical ``_derive_tint`` math runs only once per pill life,
-        # at birth, when ``enabled == True`` and status defaults to
-        # LOADED → NEUTRAL. After a toggle, the registry is updated
-        # but no signal carried the new state back to the pill widget.
-        #
-        # Replay ``pill_state_from`` for every key currently displayed
-        # in the grid and push the result via ``pill.set_state``. The
-        # pill widget calls ``update()`` internally, so the body tint,
-        # status icon, selection ring, and gui-only chip all refresh
-        # in one pass. Cheap - O(n_visible) - and runs only after a
-        # domain mutation (not on every Qt paint).
+        # ``set_keys`` runs the factory only when the key list changes.
+        # A pill toggle keeps the same keys. The pills then hold stale
+        # state until this pass pushes a fresh one to each.
         try:
             grid_keys = self.grid.keys()
             grid_pills = list(getattr(self.grid, "_pills", []))
@@ -1384,36 +909,21 @@ class LoadoutPanel(QtWidgets.QWidget):
             grid_keys, grid_pills, grid_cells = [], [], []
         if len(grid_keys) == len(grid_pills):
             global_names = registry.global_plugin_names
-            # Under the runnable-python-loadout-chain architecture, NSL
-            # no longer maintains a per-plugin
-            # loaded-set registry. Nuke's NUKE_PATH walker IS the loader;
-            # if a plugin's init.py raised, Nuke crashed the interpreter
-            # and the panel never constructed. Therefore: if the panel
-            # is open, every enabled-in-the-loadout pill is by definition
-            # "loaded this session" - there is no per-pill failed state.
-            # Per-pill diagnostic / failure-category vocabulary is gone
-            # with the rest of the runtime classifier.
+            # There is no per-pill failed state. Nuke's NUKE_PATH walker
+            # is the loader, and a failing plugin stops Nuke from
+            # starting, so the panel never opens.
             selected_keys = set(self.grid.selected_keys())
-            # loaded-in-session is read off the boot snapshot
-            # (``session_loaded_baseline``). A plugin in there was on
-            # NUKE_PATH when this Nuke session booted; anything else
-            # (folder added mid-session, plugin newly toggled) is NOT
-            # loaded yet and will only load on next restart. This is
-            # what drives the green pending-enable tint on freshly-
-            # added pills - without it ``_derive_tint`` collapses
-            # ``enabled=True + status=LOADED`` to NEUTRAL and the user
-            # sees no "will load on restart" signal. Same source the
-            # banner / Loaded counter chip uses.
+            # A plugin in ``session_loaded_baseline`` was on NUKE_PATH at
+            # boot. Anything else loads on the next restart only. That
+            # is what paints the green pending-enable tint.
             session_loaded = registry.session_loaded_baseline
             loaded_set: frozenset = (
                 frozenset(session_loaded.plugins.keys())
                 if session_loaded is not None
                 else frozenset()
             )
-            # Cell diff-tint wash matches the pill's
-            # ``_pending_border_color`` so the pending-restart signal is
-            # also legible at the cell padding (not only from the pill
-            # border + glow). Precomputed once per refresh.
+            # The cell wash matches the pill's ``_pending_border_color``
+            # so the pending signal also reads at the cell padding.
             cell_tint_load = QtGui.QColor(*CELL_DIFF_BG_LOAD_RGBA)
             cell_tint_unload = QtGui.QColor(*CELL_DIFF_BG_UNLOAD_RGBA)
             cell_tint_gui = QtGui.QColor(*CELL_DIFF_BG_GUI_ON_RGBA)
@@ -1421,12 +931,8 @@ class LoadoutPanel(QtWidgets.QWidget):
                 loaded = key in loaded_set
                 diagnostic_available = False
                 failure_label = None
-                # Source-missing: the plugin's source folder is no
-                # longer scanned (folder removed mid-session) AND it
-                # isn't part of the Global layer. Under the new
-                # architecture this is the only "needs attention"
-                # signal the pill carries; drives the YELLOW hazard
-                # body + tooltip "source folder no longer reachable".
+                # The source folder is no longer scanned and the plugin
+                # is not in the Global layer. Paints the yellow hazard body.
                 source_missing = (
                     (
                         registry.discovered_plugins is None
@@ -1441,18 +947,10 @@ class LoadoutPanel(QtWidgets.QWidget):
                     active=registry.active_model,
                     global_model=registry.global_model,
                     global_plugin_names=global_names,
-                    # ``saved_baseline`` drives the per-pill
-                    # is-dirty-vs-saved signal (white vs lime/red
-                    # border). Read the active Loadout's saved-on-disk
-                    # baseline - NOT ``session_loaded_baseline``, which
-                    # is the boot-loaded set the banner uses.
+                    # The active Loadout's saved-on-disk baseline, not
+                    # ``session_loaded_baseline``. That one is the
+                    # banner's.
                     saved_baseline=registry.active_saved_baseline,
-                    # Ceremonial-save set - names of plugins that
-                    # should read as uncommitted (no glow) regardless
-                    # of value comparison. Populated by folder-add,
-                    # cleared on Save / loadout switch. Per-plugin
-                    # scope so an unrelated pill's saved-glow isn't
-                    # affected by a folder-add.
                     force_dirty_plugins=getattr(
                         registry, "force_dirty_plugins", frozenset()
                     ),
@@ -1467,18 +965,12 @@ class LoadoutPanel(QtWidgets.QWidget):
                     ),
                     diagnostic_available=diagnostic_available,
                     failure_label=failure_label,
-                    # Panic suppresses the saved-glow on USER_ADDED
-                    # pills. They won't load on next restart in panic,
-                    # so a lime "will load" glow would lie. Globals keep
-                    # their glow.
+                    # Panic drops the saved glow on USER_ADDED pills.
+                    # They will not load, so the glow would be wrong.
+                    # Global pills keep theirs.
                     panic_engaged=panic_engaged,
-                    # Custom can't commit (Save redirects to Save As),
-                    # so the lime/red saved
-                    # vocabulary is dishonest. The flag forces the
-                    # dirty path inside ``pill_state_from`` for every
-                    # pill while Custom is active; ``_pending_border_color``
-                    # then returns None and pills fall back to the
-                    # uncommitted-white visual.
+                    # Custom cannot commit, so every pill takes the
+                    # dirty path and falls back to the white visual.
                     active_is_custom=active_is_custom,
                 )
                 fresh = pill_state_from(key, **kwargs)
@@ -1487,11 +979,8 @@ class LoadoutPanel(QtWidgets.QWidget):
                 except Exception:  # noqa: BLE001 - one bad pill must not block the rest.
                     continue
 
-                # Cell diff-tint - mirror the pill's pending-restart
-                # border colour onto the matching cell's background
-                # wash. Identity-compares against ``Palette`` constants
-                # because ``_pending_border_color`` returns the same
-                # class-level QColor objects. ``None`` clears the wash.
+                # Identity compare. ``_pending_border_color`` returns
+                # the same class-level QColor objects every time.
                 if idx < len(grid_cells):
                     cell = grid_cells[idx]
                     pending = pill._pending_border_color()
@@ -1500,46 +989,23 @@ class LoadoutPanel(QtWidgets.QWidget):
                     elif pending is Palette.BORDER_PENDING_DISABLE:
                         cell.set_diff_tint(cell_tint_unload)
                     elif fresh.gui_pending_on and fresh.gui_committed:
-                        # GUI OFF->ON, committed (saved on a saveable
-                        # slot): purple wash. Only reached when there's
-                        # no enable/disable change (load wash wins above)
-                        # and the GUI flip is persisted - never on Custom
-                        # or an unsaved edit (those keep the lit-purple
-                        # chip as the pending signal).
+                        # A committed GUI off-to-on gets a purple wash.
+                        # An unsaved flip keeps the lit chip instead.
                         cell.set_diff_tint(cell_tint_gui)
                     else:
                         cell.set_diff_tint(None)
 
-        # RE-APPLY the panic dim AFTER the pills above are (re)built.
-        # ``refresh_from_registry`` also calls ``_apply_panic_grid_visual``
-        # near its top, but that runs against whatever pills exist at
-        # that point - on a fresh panel open with panic ALREADY engaged
-        # the grid is still empty then, and a pipeline rebuild mints
-        # pills with no opacity effect at all. Re-applying here makes
-        # every path identical: the final pills always carry the panic
-        # opacity. Idempotent + cheap (effects cached per pill).
+        # Re-apply after the pills are rebuilt. On a fresh open the call
+        # in ``refresh_from_registry`` runs against an empty grid, so
+        # those pills would carry no opacity.
         self._apply_panic_grid_visual(panic_engaged)
 
     def _apply_panic_grid_visual(self, engaged: bool) -> None:
-        """Dim USER_ADDED pills via per-pill opacity when panic is on.
+        """Dim USER_ADDED pills with per-pill opacity when panic is on.
 
-        Per-pill rather than a grid-wide wash: panic only skips
-        USER-added Plugins on next restart, while GLOBAL (Global)
-        pills still load, so dimming the whole grid would falsely
-        suggest Global pills were also off.
-
-        The treatment dims each USER_ADDED pill individually
-        via its own ``QGraphicsOpacityEffect`` at 0.35; GLOBAL
-        pills stay full-color so the user sees "these will load,
-        those won't" at a glance. The classification mirrors
-        :func:`nsl.ui.state.pill_state_from` - a key in
-        ``registry.global_plugin_names`` is GLOBAL; anything
-        else is USER_ADDED.
-
-        Effects are cached per pill widget via ``setGraphicsEffect``
-        so toggling panic off only flips ``setEnabled(False)`` on
-        each existing effect, never re-allocating. Cheap to call
-        on every ``refresh_from_registry`` pass.
+        Per-pill and not grid-wide, because Global plugins still load
+        in panic. A key in ``registry.global_plugin_names`` is GLOBAL,
+        the same rule :func:`nsl.ui.state.pill_state_from` uses.
 
         No-op when ``self.registry`` is None.
         """
@@ -1574,22 +1040,14 @@ class LoadoutPanel(QtWidgets.QWidget):
                 continue
 
     def _apply_active_chips_to_grid(self, info_plugin, menu_plugin) -> None:
-        """Push ``info_active`` + ``menu_active`` to every pill.
+        """Push ``info_active`` and ``menu_active`` to every pill.
 
-        Both flags are pushed together so they stay mutually exclusive:
-        whichever pill+chip combo the user last clicked is the only one
-        lit. Pass ``info_plugin=name, menu_plugin=None`` when reacting
-        to an info click; the inverse on a menu click. Pass both
-        ``None`` to clear everything.
+        Both flags go out together so only one pill and chip stays lit.
+        Pass ``info_plugin=name, menu_plugin=None`` on an info click,
+        and the reverse on a menu click. Pass both ``None`` to clear.
 
-        Called by ``Registry.on_pill_info`` and
-        ``Registry.on_pill_menu`` after the side panel content
-        is set.
-
-        Mirrors ``_on_grid_selection_changed``'s shape - per-pill paint
-        state has to be pushed from the outer source to every pill on
-        every change, because pill paint reads its own ``_state`` not
-        the panel's.
+        A pill paints from its own ``_state``, so every pill needs the
+        push, not only the clicked one.
         """
         try:
             pill_keys = list(self.grid.keys())
@@ -1611,20 +1069,13 @@ class LoadoutPanel(QtWidgets.QWidget):
                 pass
 
     def _on_grid_selection_changed(self, selected_keys: list) -> None:
-        """Update the counter strip's Selected chip on selection mutation.
+        """Update the counter strip's Selected chip and the pill rings.
 
-        Full refresh is overkill for a selection change; rebuild the
-        strip locally so its non-selection chips keep the values the
-        last refresh computed.
+        A full refresh is too much for a selection change, so the strip
+        is rebuilt here and keeps its other chip values.
 
-        The per-pill selected flag is pushed too.
-        ``_Cell.set_selected`` only drives the cell's
-        selection halo; the pill's orange selection ring is painted
-        inside the pill itself from ``PillState.selected`` and never
-        updated by the cell. Without this loop a Select-All → Clear
-        sequence left every pill painting the orange ring against a
-        zero-key selection - pill border + cell halo are independent
-        paint surfaces, both need updating on selection change.
+        The pill's orange ring paints from ``PillState.selected``, and
+        the cell halo is a separate surface. Both need the push.
         """
         selected_set = set(selected_keys)
         try:
@@ -1652,10 +1103,6 @@ class LoadoutPanel(QtWidgets.QWidget):
         if registry is None:
             strip.set_counters(len(selected_keys), total, 0, 0, 0, 0, loaded_session)
             return
-        # Sparse-diff resolution - see refresh_from_registry banner
-        # block. ``resolved_active_for_diff`` overlays the active
-        # Loadout on Global so keys absent from active correctly
-        # resolve to their Global value before the diff math runs.
         current_for_diff = registry.resolved_active_for_diff
         pending_add, pending_del = pending_diff_split(
             current_active=current_for_diff,
@@ -1672,21 +1119,12 @@ class LoadoutPanel(QtWidgets.QWidget):
         )
 
     def _count_loaded_session(self) -> int:
-        """Count plugins NSL loaded into THIS Nuke session - a fixed total.
+        """Count the plugins NSL loaded into this Nuke session.
 
-        Reads the session baseline (``registry.session_loaded_baseline``),
-        which is backed by the boot-time manifest the loadout file stamps at
-        each ``pluginAddPath`` call (see
-        :meth:`Registry._nsl_session_manifest`). The count does NOT intersect
-        with the visible grid, so filtering the grid, toggling a pill, or
-        deleting a plugin folder mid-session never moves it: a plugin that
-        loaded this session stays counted even after its folder is gone.
-
-        The count is the session total, not the visible intersection: a
-        visible-intersection count ("of the visible plugins, how many
-        loaded") under-reports whenever a loaded plugin leaves the grid
-        (e.g. its folder is deleted, so the Loaded count would lie). One
-        chip, one honest meaning: the session-total truth.
+        Reads ``registry.session_loaded_baseline``, the boot-time
+        manifest. The count is a session total and never intersects
+        with the visible grid, so filtering the grid or removing a
+        folder does not move it.
         """
         registry = self.registry
         if registry is None:
@@ -1699,29 +1137,14 @@ class LoadoutPanel(QtWidgets.QWidget):
     def _registry_pill_factory(self, key: str):
         """Pill factory used when a Registry is attached.
 
-        Derives :class:`PillState` from the live registry state via
-        :func:`nsl.ui.state.pill_state_from` so newly-created pills
-        carry the right enabled / gui_only / source / status hints.
-        Also threads ``loaded_in_session`` from the boot-time
-        session-loaded baseline so the
-        ``(enabled, status_icon)`` tint derivation has session truth
-        at birth - otherwise newly-built pills would default to
-        optimistic LOADED, collapsing every diff to NEUTRAL.
-        ``refresh_from_registry`` re-pushes fresh state on every
-        registry mutation; this method only needs to get the *first*
-        paint right.
+        Derives the :class:`PillState` from live registry state, so the
+        first paint is right. ``refresh_from_registry`` pushes fresh
+        state on every mutation after that.
         """
         registry = self.registry
         if registry is None:
             return _default_pill_factory(key)
         from nsl.constants import DEFAULT_CUSTOM_LOADOUT_STEM  # noqa: PLC0415
-        # loaded-in-session is read off the boot snapshot
-        # (``session_loaded_baseline``). A plugin in there was on
-        # NUKE_PATH when this Nuke session booted; anything else
-        # (folder added mid-session) is NOT loaded yet and will only
-        # load on next restart. Without this the freshly-discovered
-        # pills paint NEUTRAL instead of GREEN pending-enable. Same
-        # derivation the refresh path uses.
         session_loaded = registry.session_loaded_baseline
         loaded = session_loaded is not None and key in session_loaded.plugins
         diagnostic_available = False
@@ -1741,22 +1164,15 @@ class LoadoutPanel(QtWidgets.QWidget):
             active=registry.active_model,
             global_model=registry.global_model,
             global_plugin_names=registry.global_plugin_names,
-            # See refresh_from_registry - saved_baseline drives the
-            # white/lime/red border, not the banner; use the active
-            # Loadout's on-disk baseline.
             saved_baseline=registry.active_saved_baseline,
             force_dirty_plugins=getattr(
                 registry, "force_dirty_plugins", frozenset()
             ),
             source_missing=source_missing,
             loaded_in_session=loaded,
-            # Session GUI-only baseline - drives the gui_pending_on/off
-            # + gui_committed visuals (lit chip, red chip text, red GUI
-            # border). The factory is the ONLY state source when the
-            # grid rebuilds through the filter/sort pipeline (set_keys
-            # re-mints pills without a refresh_from_registry pass), so
-            # omitting this wiped every GUI diff indicator on a sort or
-            # filter change. Same derivation as the refresh path.
+            # The factory is the only state source when the pipeline
+            # rebuilds the grid. Without this the GUI diff indicators
+            # disappear on a sort or filter change.
             session_gui_only=(
                 session_loaded.plugins[key].gui_only
                 if session_loaded is not None
@@ -1765,15 +1181,10 @@ class LoadoutPanel(QtWidgets.QWidget):
             ),
             diagnostic_available=diagnostic_available,
             failure_label=failure_label,
-            # First-paint panic gate: read it off settings so a
-            # registry built in panic mode mints pills without the
-            # misleading lime saved-glow. refresh_from_registry
-            # re-pushes the same flag on every subsequent refresh.
+            # Read panic off settings, so a panel built in panic mints
+            # pills with no saved glow.
             panic_engaged=bool(getattr(registry.state, "panic", False)),
-            # First-paint Custom-honesty gate: same rationale as
-            # ``refresh_from_registry`` - Custom can't commit, so
-            # never paint the lime/red committed vocabulary on a
-            # pill while Custom is active. See state.py.
+            # Custom cannot commit, so the committed visuals stay off.
             active_is_custom=bool(
                 registry.state is not None
                 and registry.state.active
@@ -1791,9 +1202,8 @@ class LoadoutPanel(QtWidgets.QWidget):
 def _active_strip_name(registry: "Registry") -> str:
     """Resolve the strip's active-row name from registry settings.
 
-    Row names are bare stems. When no Global layer is configured, the
-    ``Global`` row does not exist - first-run / empty-stem falls back to
-    Custom instead of Global.
+    Row names are bare stems. With no Global layer there is no
+    ``Global`` row, so an empty stem falls back to Custom.
     """
     from nsl.constants import (
         DEFAULT_CUSTOM_LOADOUT_STEM,
@@ -1825,19 +1235,14 @@ def _count_gui_only(model) -> int:
 def _session_summary_html(
     grid_has_pills: bool = False, *, registry=None
 ) -> str:
-    """Render the Side Panel ▸ Summary tab content.
+    """Render the Side Panel Summary tab content.
 
-    Under the runnable-python-loadout-chain architecture,
-    NSL no longer maintains a per-plugin loaded-set registry - Nuke's
-    NUKE_PATH walker is the loader, and a failing plugin's init.py
-    crashes the whole interpreter (no per-plugin Failed list survives
-    into the running session). The Summary therefore collapses to the
-    boot-time effective state ("what should be loaded right now") plus
-    a Missing count for plugins whose source folders have vanished.
+    The Summary shows the boot-time effective state, plus a Missing
+    count for plugins whose source folders have gone.
 
-    The ``grid_has_pills`` flag drives the body copy when nothing is
-    declared by the active loadout - splits "true empty" (no pills
-    anywhere) from "pills enabled, awaiting save+restart".
+    ``grid_has_pills`` picks the body copy when the active Loadout
+    declares nothing. It separates an empty panel from one waiting on
+    a save and a restart.
     """
     baseline = (
         registry.session_loaded_baseline if registry is not None else None
@@ -1865,25 +1270,13 @@ def _session_summary_html(
         getattr(registry, "active_model", None) if registry is not None else None
     )
 
-    # Removed - loaded THIS session but their source folder is gone now
-    # (so they've left the grid). They still count as loaded for this
-    # running session (that truth is frozen in the boot manifest), but
-    # they won't load next time Nuke starts. "Not in discovered" maps
-    # exactly to "no longer a pill in the grid", which is what the user
-    # sees.
+    # Loaded this session, but the source folder is gone now, so the
+    # plugin has left the grid.
     removed: set[str] = {name for name in loaded if name not in discovered}
 
-    # Missing - plugins that were ACTIVELY LOADED THIS SESSION whose source
-    # folder no longer resolves on disk. Plugins unique to a removed folder
-    # that were actively loaded this session become Missing; Plugins not
-    # actively loaded simply disappear from the list. The "loaded this
-    # session" gate (``name in loaded``, derived from session_loaded_baseline)
-    # guards a false-positive: adding a Plugins Folder then removing it
-    # WITHOUT a save/restart leaves the never-loaded
-    # plugin names in active_model.plugins, which would otherwise be
-    # wrongly reported as
-    # Missing. A never-loaded plugin that's gone from the loadout is just gone
-    # - it disappears silently, it was never "missing" from a running session.
+    # Missing means loaded this session, but the source folder no longer
+    # resolves. The ``loaded`` gate stops a folder added and removed
+    # without a save from reporting never-loaded plugins as Missing.
     loaded_set = set(loaded)
     missing_set: set[str] = set()
     for src in (active_model, global_model):
@@ -1891,14 +1284,12 @@ def _session_summary_html(
             continue
         for name in src.plugins.keys():
             if name not in loaded_set:
-                # Never loaded this session -> not Missing, just gone.
                 continue
             in_discovery = name in discovered
             in_global = (
                 global_model is not None and name in global_model.plugins
             )
-            # Global-resident plugins are always considered resolvable
-            # (the global resolver already validated their paths).
+            # The global resolver already validated the Global paths.
             if not (in_discovery or in_global):
                 missing_set.add(name)
     missing = sorted(missing_set)
@@ -1966,11 +1357,8 @@ def _session_summary_html(
 def _loaded_row(name: str, is_gui_only: bool, is_removed: bool) -> str:
     """One ``<li>`` for the 'Loaded this session' list.
 
-    A removed plugin (loaded this session, but its source folder is gone
-    now) renders reddish with a '- removed' tag in the same red as the
-    '-N' pending-remove counter chip, so the user can see at a glance
-    which loaded plugins won't exist next time Nuke starts. GUI-only and
-    removed are independent: a row can carry both tags.
+    A removed plugin renders red with a '- removed' tag. GUI-only and
+    removed are independent, so a row can carry both tags.
     """
     label = _escape(name)
     if is_removed:
@@ -1979,12 +1367,10 @@ def _loaded_row(name: str, is_gui_only: bool, is_removed: bool) -> str:
 
 
 def _removed_tag(is_removed: bool) -> str:
-    """Reddish '- removed' suffix for a loaded-plugin row, or '' if not.
+    """Reddish '- removed' suffix for a loaded-plugin row, or ''.
 
-    Marks a plugin that loaded this session but whose source folder is no
-    longer on disk (it has left the grid). It still counts as loaded for
-    this running session, but will not load next time Nuke starts. Same
-    red as the '-N' pending-remove chip so the two read as one story.
+    Marks a plugin that loaded this session but whose source folder is
+    gone. Same red as the '-N' pending-remove chip.
     """
     if not is_removed:
         return ""
@@ -1992,11 +1378,10 @@ def _removed_tag(is_removed: bool) -> str:
 
 
 def _gui_tag(is_gui_only: bool) -> str:
-    """Muted '- GUI-only' suffix for a loaded-plugin row, or '' if not.
+    """Muted '- GUI-only' suffix for a loaded-plugin row, or ''.
 
-    Marks plugins the loadout flagged ``gui=True`` (rendered as
-    ``if gui and not nuke.GUI: skip`` in the loadout init.py) - they load
-    in Nuke's GUI mode but are skipped in terminal and render sessions.
+    Marks plugins the loadout flagged ``gui=True``. They load in Nuke's
+    GUI mode and are skipped in terminal and render sessions.
     """
     if not is_gui_only:
         return ""
@@ -2013,26 +1398,15 @@ def _escape(text: str) -> str:
 
 
 def _plugin_key_union(registry: "Registry") -> list:
-    """Union of plugin names that should render as pills, alpha-sorted.
+    """Union of plugin names that render as pills, sorted A to Z.
 
-    Three live sources contribute keys:
+    Two sources contribute keys: ``registry.discovered_plugins`` and
+    ``registry.global_model.plugins``.
 
-    * ``registry.discovered_plugins`` - plugins the scanner found in
-      the configured Plugins Folders this scan.
-    * ``registry.global_model.plugins`` - plugins listed in the
-      resolved Global Global Loadout.
-    Active-loadout (``registry.active_model``) entries do NOT contribute
-    keys on their own. Under the sparse loadout-file model the file holds
-    only *exceptions* (disabled / gui-only); a disabled entry whose source
-    folder is gone (removed or ``_``-ignored before boot) is stale data,
-    not a dependency-loss signal. Showing it as a Missing pill while the
-    diff/banner's orphan filter (see :attr:`Registry.resolved_active_for_diff`)
-    ignored it produced a contradictory "marked for removal, nothing pending"
-    state. So an active entry shows ONLY when it also has a live source -
-    i.e. it's discovered on disk now, or it's a Global/Global plugin
-    (both already contribute via the unions above). Global plugins
-    that vanish still surface as Missing via the Global union; user-loadout
-    orphans simply don't render.
+    ``registry.active_model`` contributes none on its own. The loadout
+    file is sparse and holds exceptions only, so an entry with no live
+    source is stale data. Rendering it gave a Missing pill that the
+    banner's orphan filter did not count.
     """
     keys: set = set()
     discovered = getattr(registry, "discovered_plugins", None)
@@ -2040,10 +1414,8 @@ def _plugin_key_union(registry: "Registry") -> list:
         keys.update(discovered.keys())
     if registry.global_model is not None:
         keys.update(registry.global_model.plugins.keys())
-    # Drop keys whose source folder is currently hidden so visibility
-    # survives every refresh path (pill toggle,
-    # loadout switch). Keys without a discovered source (active/global
-    # only) are unaffected.
+    # Drop keys whose source folder is hidden, so the eye toggle
+    # survives every refresh path.
     visibility = getattr(registry, "folder_visibility", {}) or {}
     if visibility and discovered:
         keys = {
@@ -2055,16 +1427,14 @@ def _plugin_key_union(registry: "Registry") -> list:
 
 
 # ---------------------------------------------------------------------------
-# Default pill factory - used when the wiring layer hasn't provided one yet.
+# Default pill factory
 # ---------------------------------------------------------------------------
 
 
 def _default_pill_factory(key: str):
     """Return a placeholder :class:`PluginPill` for a key.
 
-    The wiring layer (sort / filter / status routing) is responsible for
-    producing real pills bound to real Plugin state. This factory is the
-    fallback used when no registry-aware factory is installed.
+    The fallback used when no registry-aware factory is installed.
     """
     state = PillState(plugin_name=key)
     return PluginPill(state)
