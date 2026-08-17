@@ -1,28 +1,14 @@
 """Shared selection model for the Loadout Panel.
 
-This module owns the canonical selection set for the panel. The
-:class:`PluginsGrid` keeps an internal mirror for cell paint only; the
-search/tags strip, the folder card's *Select* button, and the grid
-toolbar's *Clear Selection* button all mutate the *same*
-:class:`SelectionModel` via the bridge installed by
-:func:`wire_selection`.
+This module owns the canonical selection set. :class:`PluginsGrid` keeps
+a mirror of it for cell paint only.
 
-Key behavior:
-
-* **Per-session** - never persisted to disk. The model is plain
-  in-memory state; no JSON, no autosave.
-* **Selection survives filter changes** - a Plugin selected via marquee
-  / ctrl-click / ``Select filtered`` / folder ``Select`` stays selected
-  even if a subsequent search or invert hides it from view.
-* **Bulk actions act on the full selection** - the grid toolbar's count
-  reflects ``model.size()``, not the visible-after-filter subset.
-* This model emits exactly one ``changed`` signal per mutation call, so
-  the action layer needs only one undo-stack push per call.
-* ``Select filtered`` reads the visible set from the grid keys + the
-  search query + the Invert toggle.
-
-The pure model is Qt-free (imported via :mod:`nsl.compat`);
-a thin Qt subclass adds the ``changed`` signal for widget consumption.
+* The set lives in memory for the session. Nothing is written to disk.
+* A selected Plugin stays selected when a later search or invert hides it.
+* Bulk actions and the toolbar count use the whole set, not the
+  visible-after-filter subset.
+* Each mutation call emits ``changed`` once, so the action layer pushes
+  one undo entry per call.
 """
 
 from __future__ import annotations
@@ -37,29 +23,21 @@ __all__ = ["SelectionModel", "wire_selection"]
 
 
 # ---------------------------------------------------------------------------
-# SelectionModel - Qt-bridged but core logic is pure
+# SelectionModel
 # ---------------------------------------------------------------------------
 
 
 class SelectionModel(QtCore.QObject):
     """Canonical per-session selection set for the Loadout Panel.
 
-    The set is unordered internally; the ``changed`` signal and the
-    :meth:`selected_keys` accessor return a deterministic *sorted* list
-    so downstream consumers (toolbar count, grid paint, snapshot
-    assertions) see a stable order.
+    The set is unordered inside. :meth:`selected_keys` and the
+    ``changed`` payload both return a sorted list, so the toolbar count,
+    the grid paint, and the tests see a stable order.
 
-    Signals:
+    ``changed(list)`` fires only on a real change. Replacing the set
+    with the same members does not emit.
 
-    * ``changed(list)`` - emitted whenever the selection set changes.
-      Payload is the new ``selected_keys()`` (sorted list of strings).
-      Identity replacements (``replace`` with the same set) do **not**
-      emit; only genuine state changes do.
-
-    Mutation methods all return ``True`` if the set changed, ``False``
-    if the call was a no-op. The return value is convenient for tests
-    and for any action-layer logic that wants to skip a redundant
-    undo-stack push.
+    Every mutation method returns True when the set changed.
     """
 
     changed = QtCore.Signal(list)
@@ -78,14 +56,14 @@ class SelectionModel(QtCore.QObject):
         """Return the number of selected keys."""
         return len(self._selected)
 
-    def __len__(self) -> int:  # convenience for ``len(model)``
+    def __len__(self) -> int:
         return len(self._selected)
 
     def __contains__(self, key: object) -> bool:
         return key in self._selected
 
     def contains(self, key: str) -> bool:
-        """Explicit membership predicate (mirrors ``in`` for clarity)."""
+        """Return True if ``key`` is selected. Same result as ``in``."""
         return key in self._selected
 
     # -- mutations ------------------------------------------------------
@@ -107,7 +85,7 @@ class SelectionModel(QtCore.QObject):
         return True
 
     def toggle(self, key: str) -> bool:
-        """Ctrl-click semantics - flip a single key's membership."""
+        """Flip one key in or out of the set. This is ctrl-click."""
         if key in self._selected:
             self._selected.discard(key)
         else:
@@ -116,11 +94,10 @@ class SelectionModel(QtCore.QObject):
         return True
 
     def replace(self, keys: Iterable[str]) -> bool:
-        """Replace the selection with *keys* (set semantics).
+        """Replace the selection with *keys*.
 
-        Used by marquee release, plain ``Select filtered``, and folder
-        ``Select`` (each of those replaces the prior selection rather
-        than adding to it, by design).
+        Marquee release, plain ``Select filtered``, and folder
+        ``Select`` all replace instead of adding.
         """
         new = set(keys)
         if new == self._selected:
@@ -132,8 +109,8 @@ class SelectionModel(QtCore.QObject):
     def add_many(self, keys: Iterable[str]) -> bool:
         """Union *keys* into the current selection.
 
-        Used by shift-click ``Select filtered`` (the power-user shortcut
-        for building a selection across multiple filter passes).
+        Used by shift-click ``Select filtered``, which builds a
+        selection across several filter passes.
         """
         new = self._selected | set(keys)
         if new == self._selected:
@@ -159,14 +136,10 @@ class SelectionModel(QtCore.QObject):
 # ---------------------------------------------------------------------------
 # Filter helpers - local copy of the search-strip's matching rule
 # ---------------------------------------------------------------------------
-#
-# We re-implement the search-match predicate inline so this module can
-# compute the visible-after-filter set without importing
-# :mod:`nsl.ui.search_tags` (which would create a Qt-import
-# cycle in some environments where the strip is not yet built). The
-# behaviour matches ``nsl.ui.search_tags.match_query``
-# exactly: case-insensitive substring match against the Plugin name.
-# Empty query matches all.
+
+# ``nsl.ui.search_tags.match_query`` is copied here instead of imported,
+# because the import can make a Qt-import cycle. The rule is the same.
+# Case-insensitive substring on the Plugin name, empty query matches all.
 
 
 def _matches_query(query: str, plugin_name: str) -> bool:
@@ -181,12 +154,10 @@ def _visible_after_filter(
     query: str,
     invert: bool,
 ) -> List[str]:
-    """Return *keys* filtered by ``query`` (with optional invert).
+    """Return *keys* filtered by ``query``, with optional invert.
 
-    Mirrors the search/tags strip's filter semantics. Tag chips are
-    deferred to v2, so this v1 implementation considers only the search
-    query and the invert toggle. The strip's filter pipeline composes
-    via AND across these axes.
+    Tag chips are deferred to v2, so only the query and the invert
+    toggle apply here.
     """
     matched = {k for k in keys if _matches_query(query, k)}
     if invert:
@@ -207,43 +178,25 @@ def wire_selection(
 ) -> None:
     """Install a shared :class:`SelectionModel` on *panel* and bridge widgets.
 
-    Called from ``panel._wire_signals()``; this module must not edit
+    Called from ``panel._wire_signals()``. This module must not edit
     ``panel.py`` directly.
 
     The bridge:
 
-    * Creates ``panel.selection_model`` if absent (callers can install a
-      pre-built model first to share across panels).
-    * Routes grid ``selection_changed(list)`` → ``model.replace(list)``
-      (marquee + ctrl-click in the grid drive the canonical model).
-    * Routes search/tags ``select_filtered_requested(add_to_selection)``
-      → compute the visible-after-filter set from
-      ``panel.grid.keys()`` + the strip's current ``query()`` and
-      ``is_inverted()``; ``replace`` it (plain click) or ``add_many``
-      (shift-click).
-    * Routes folder_card ``select_requested(path)`` → ask
-      ``folder_keys_for_path(path)`` for the Plugin keys belonging to
-      that folder (downstream data layer owns the mapping), intersect
-      with the visible-after-filter set, then ``replace`` it. The folder
-      ``Select`` button **replaces** the selection rather than adding to
-      it.
-    * Routes grid_toolbar ``clear_selection_requested`` → ``model.clear()``.
-    * Pushes every ``model.changed`` payload back to the grid (paint)
-      and the grid_toolbar (count), passing ``emit=False`` to the grid
-      so the bridge does not loop.
+    * Creates ``panel.selection_model`` unless the caller installed one.
+    * grid ``selection_changed(list)`` to ``model.replace``.
+    * search/tags ``select_filtered_requested(add)`` to ``replace``, or
+      ``add_many`` on shift-click. The visible set comes from
+      ``grid.keys()``, ``query()`` and ``is_inverted()``.
+    * grid_toolbar ``clear_selection_requested`` to ``model.clear``.
+    * ``model.changed`` back to the grid for paint and to the toolbar
+      for the count.
 
-    ``folder_keys_for_path`` may be ``None``; in that case the
-    folder-row Select bridge falls back to "select every visible key in
-    the grid" so the affordance still functions end-to-end at the panel
-    composition layer. Production wiring installs a real mapping driven
-    by the discovered-Plugins data.
+    Folder Select is not wired here. ``events.py`` owns it, so
+    ``folder_keys_for_path`` is currently unused.
 
-    Idempotent - calling twice does not double-connect; the second call
-    is a no-op.
+    Calling this twice is a no-op.
     """
-    # Idempotency guard. The orchestrator's stitch is conservative and
-    # may end up calling this twice in some refactor scenarios; we keep
-    # the bridge stable in that case.
     if getattr(panel, "_selection_wired", False):
         return
 
@@ -258,10 +211,8 @@ def wire_selection(
     folder_card = getattr(panel, "folder_card", None)
 
     # ---- grid → model (marquee + ctrl-click) ----------------------------
-    # The grid keeps an internal mirror set for cell paint and emits the
-    # full selection list on every mutation. We treat its emission as the
-    # canonical "replace" source. ``select_keys(..., emit=False)`` is used
-    # on the return path (model → grid) so we do not bounce.
+    # The grid emits the full selection on every change. The flag below
+    # blocks the return path, so model to grid does not bounce back.
     _bridge_state = {"applying_from_model": False}
 
     def _on_grid_selection_changed(keys: list) -> None:
@@ -291,13 +242,8 @@ def wire_selection(
         search_tags.select_filtered_requested.connect(_on_select_filtered)
 
     # ---- folder_card → model (per-folder Select) ----
-    # The events.py wiring layer is the sole owner of folder
-    # Select/Deselect, including the additive-across-folders semantic
-    # ("folder list select icon wins; subsequent folder clicks add").
-    # This helper must NOT connect to ``folder_card.select_requested``:
-    # its filter-aware ``model.replace`` would compete with events.py and
-    # collapse the additive behaviour into a replace. It is kept as a
-    # backwards-compatible internal but is intentionally left unconnected.
+    # Do not connect this to ``folder_card.select_requested``. It
+    # replaces, and ``events.py`` owns folder Select and adds instead.
     def _on_folder_select(path: str) -> None:  # noqa: F841
         if grid is None:
             return
@@ -325,19 +271,14 @@ def wire_selection(
 
     # ---- model → grid + toolbar (paint + count) -------------------------
     def _on_model_changed(keys: list) -> None:
-        # Push to grid for paint, suppressing its re-emission so we don't
-        # bounce back into _on_grid_selection_changed.
         if grid is not None and hasattr(grid, "select_keys"):
             _bridge_state["applying_from_model"] = True
             try:
                 grid.select_keys(list(keys), emit=False)
             finally:
                 _bridge_state["applying_from_model"] = False
-        # Push the **full** size to the toolbar. The toolbar's count is
-        # the full selection size, not the visible-after-filter subset.
-        # The gui_only_count argument is left None so the toolbar mirrors
-        # the full count; downstream wiring overrides this with a
-        # provenance-aware count once the Global filter is in place.
+        # ``gui_only_count`` is left None, so the toolbar mirrors the
+        # full count. Downstream wiring sets a provenance-aware count.
         if grid_toolbar is not None and hasattr(grid_toolbar, "set_counts"):
             grid_toolbar.set_counts(len(keys))
 
