@@ -10,9 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Comments and docstrings rewritten across all 62 modules to a shorter,
-  plainer standard. Comment volume is down by more than half and the
-  source is around 6,300 lines lighter, keeping the explanation that
-  earns its place and cutting what only restated the code.
+  plainer standard. Comment volume is down by more than half.
 
 Documentation only. The executable code is unchanged, verified by
 comparing the syntax tree of every file before and after, so panel
