@@ -1,31 +1,15 @@
 """Bootstrap a production :class:`Registry` from on-disk state.
 
-The panel calls :func:`build_registry_for_panel` during ``__init__``
-to populate its registry from:
+The panel host calls :func:`build_registry_for_panel` before
+``LoadoutPanel.__init__``. It reads three sources: the dispatcher at
+``~/.nuke/loadouts/init.py``, the Global layer under ``<install>/Global``,
+and the active user Loadout file.
 
-* The dispatcher init.py at ``~/.nuke/loadouts/init.py`` (or first-run
-  defaults when the file is missing). The dispatcher holds the panic
-  flag and the active-loadout pointer.
-* The resolved Global layer: the chain head ``<install>/Global/init.py``
-  names the Global plugins and loadout dirs (the boot session record
-  carries the head's actual resolved values; a static head parse is the
-  offline fallback for each), the optional ``Global/Global_Loadout/init.py``
-  supplies per-plugin directives (parsed, never executed in this role),
-  and a scan of the plugins dir supplies the default-on names.
-* The active user Loadout file from disk (or ``None`` when Global
-  is the active pointer).
+A failure returns a structured error instead of raising into
+``panel.__init__``. :func:`nsl.ui.degraded.wire_degraded` picks the error
+up from ``panel.degraded``.
 
-User-added plugin source folders are derived from the dispatcher's
-folder declarations (or the active loadout file's folders as a
-fallback).
-
-Failures here are funnelled to the degraded-panel path that
-:func:`nsl.ui.degraded.wire_degraded` already gates on
-``panel.degraded`` - the bootstrap surfaces a structured error rather
-than raising into ``panel.__init__``.
-
-No ``import nuke`` at module scope - Nuke integration lives in the
-top-level ``init.py`` / ``menu.py``; the boot session record is read
+Never ``import nuke`` at module scope. The boot session record is read
 through a guarded import.
 """
 
@@ -68,10 +52,9 @@ _log = logging.getLogger(__name__)
 class BootstrapResult:
     """Outcome of :func:`build_registry_for_panel`.
 
-    ``registry`` is always populated - on hard failure the registry
-    carries first-run defaults so the panel still constructs. ``error``
-    is a human-readable string the panel's degraded mode can surface;
-    ``None`` means a clean bootstrap.
+    ``registry`` is always set. On hard failure it carries first-run
+    defaults, so the panel still constructs. ``error`` is ``None`` on a
+    clean bootstrap, and otherwise a string for degraded mode to show.
     """
 
     registry: Registry
@@ -85,60 +68,41 @@ def build_registry_for_panel(
     refresh_callback: Optional[Callable[[], None]] = None,
     parent_widget: Optional[Any] = None,
 ) -> BootstrapResult:
-    """Assemble a :class:`Registry` from on-disk + env state.
+    """Assemble a :class:`Registry` from on-disk state.
 
-    ``dispatcher_path`` is optional - defaults to ``loadouts_dir/init.py``
-    (the canonical chain location). On hard failure (unreadable
-    dispatcher, malformed Global) the registry carries first-run
-    defaults and the result's ``error`` is populated.
+    ``dispatcher_path`` defaults to ``loadouts_dir/init.py``, the chain
+    location. On hard failure the registry carries first-run defaults
+    and ``error`` is set.
     """
     loadouts_dir = Path(loadouts_dir)
     loadouts_dir.mkdir(parents=True, exist_ok=True)
 
-    # Reclaim orphaned ``*.tmp`` siblings left by a write that crashed between
-    # the temp-write and the final ``os.replace`` (atomic_io.write_atomic).
-    # Bootstrap is the race-safe moment to do this: no NSL write is in flight
-    # during panel construction, so the only ``.tmp`` files present are dead
-    # leftovers - never a concurrent writer's in-flight temp. Doing it at the
-    # head of a write path instead would risk deleting a sibling writer's temp
-    # (the Issue 21 race). The sweep is non-recursive, so it runs once on
-    # ``loadouts_dir`` (orphan ``init.py.tmp`` from a dispatcher write) and
-    # once per direct subfolder (orphan from a per-loadout write).
+    # Panel construction is the safe moment to delete orphan ``*.tmp``
+    # files. No NSL write is in flight, so every one of them is a dead
+    # leftover. The same sweep inside a write path could delete a sibling
+    # writer's live temp file (Issue 21).
     _sweep_orphans(loadouts_dir)
 
-    # Resolve the Global layer ONCE: the model feeds the read-only Global
-    # row; the plugins dir feeds the registry so its rescan walks the same
-    # folder the boot-side Global head loaded. Without the dir reaching
-    # the registry, ``discovered_plugins`` misses every Global Plugin →
-    # info button breaks on Global pills.
+    # The registry needs the Global plugins dir, not only the model. Without
+    # the dir, a rescan drops every Global Plugin from
+    # ``discovered_plugins`` and the info button breaks on Global pills.
     nsl_root = install_root()
     global_layer = _load_global(nsl_root)
 
     dispatcher_file = Path(dispatcher_path or (loadouts_dir / "init.py"))
     state, state_error = _load_dispatcher_state(dispatcher_file)
-    # Invariant: "Custom" is the in-memory wildcard - never a real on-disk
-    # loadout. An older build wrote ``ACTIVE_LOADOUT="Custom"`` on a
-    # dropdown-switch; normalise any such stale pointer to "" so
-    # ``_load_active`` doesn't chase a non-existent ``loadouts/Custom/``
-    # folder (surfacing a spurious "missing" error) and the pending-Custom
-    # synthesis below applies instead. WRITE the normalisation back once
-    # (same guarded pattern as the Global_Loadout case below): a
-    # memory-only reset left ``ACTIVE_LOADOUT="Custom"`` on disk, and a
-    # later ``persist_folder_authority`` that re-read the unchanged
-    # dispatcher would resurrect it - re-triggering the spurious
-    # "missing: Custom" log on every boot. Converging disk here ends that
-    # cycle on the first open.
+    # ``Custom`` is in-memory only and never a folder on disk. An older build
+    # wrote it as the active pointer. A stale one is reset to "" and written
+    # back, because a memory-only reset leaves ``Custom`` on disk.
     if state.active == DEFAULT_CUSTOM_LOADOUT_STEM:
         state.active = ""
         try:
             write_dispatcher(str(dispatcher_file), state)
         except OSError as exc:
             _log.warning("could not persist Custom pointer reset: %s", exc)
-    # Case B normalize-and-persist: when the Global copy of
-    # ``Global_Loadout`` exists, the user-land loadout of the same name is
-    # hidden and never activatable - a stale dispatcher pointer at it is
-    # normalised to "" (the read-only Global view) and WRITTEN back once
-    # so boot converges with what the panel shows.
+    # The user-land ``Global_Loadout`` is hidden while the Global copy
+    # exists. A pointer at it is reset to "" and written back. Boot then
+    # agrees with the read-only Global view the panel shows.
     if state.active == GLOBAL_LOADOUT_DIR_NAME and global_layer.has_loadout_copy:
         state.active = ""
         try:
@@ -149,39 +113,18 @@ def build_registry_for_panel(
     global_error = global_layer.error
     active_model, legacy_dirs, active_error = _load_active(loadouts_dir, state)
 
-    # Folder authority is the dispatcher (``DispatcherState.folders``), so the
-    # Plugins Folder list survives regardless of which loadout is active -
-    # including the unsaveable Custom slot, which is what previously dropped
-    # folders on panel close/reopen. Fall back to the active loadout's own
-    # folder decls ONLY when the dispatcher has none yet (a tree written
-    # before folders moved to the dispatcher); the next folder op / save
-    # migrates them up to the dispatcher.
+    # The dispatcher owns the folder list, so the Plugins Folders survive
+    # any Loadout switch, Custom included. The Loadout's own decls are the
+    # fallback for a tree written before folders moved to the dispatcher.
     if state.folders:
         user_plugin_dirs = [decl.path for decl in state.folders]
     else:
         user_plugin_dirs = legacy_dirs
 
-    # Folders configured but NO saved loadout active → synthesize an
-    # in-memory pending Custom so the discovered plugins default ON
-    # (enabled + pending, ready for a single Save), matching the first-add
-    # experience (``nsl.ui.wiring.events._add_folder_in_memory``).
-    #
-    # Without this, ``active_model`` is None, so ``ui.state.pill_state_from``
-    # defaults USER_ADDED plugins to DISABLED ("Global-active honesty").
-    # That made a reopen after "Don't Save" show every discovered plugin
-    # OFF (red ✕): a Save would then have persisted them off, forcing the
-    # user to re-enable each by hand - the plugins are pending precisely
-    # because no loadout is saved yet, so the honest default is ON+pending
-    # awaiting Save, not OFF.
-    #
-    # The synthesized active is IN MEMORY ONLY - the on-disk dispatcher
-    # keeps ``ACTIVE_LOADOUT=""`` (Custom never persists as the active
-    # pointer). ``Registry._reconcile_discovered_into_active`` (run by the
-    # ``scan_and_refresh`` below) auto-enables the discovered plugins now
-    # that the active stem is Custom. The "no folders" first-run / Global
-    # case is untouched (``user_plugin_dirs`` empty → no synthesis), so the
-    # "I want just the Global view" selection still defaults user plugins
-    # off as before.
+    # Folders are configured but no Loadout is saved, so an in-memory
+    # Custom stands in. Without it ``active_model`` stays None and the
+    # pill grid defaults every user plugin to off. Nothing writes this
+    # pointer to disk: ``persist_folder_authority`` maps ``Custom`` to "".
     if not state.active and user_plugin_dirs:
         state.active = DEFAULT_CUSTOM_LOADOUT_STEM
         active_model = LoadoutFile(
@@ -204,12 +147,8 @@ def build_registry_for_panel(
         global_loadout_error=global_layer.error,
     )
 
-    # Populate the discovered_plugins set
-    # at bootstrap so a returning user (loadout already lists their
-    # Plugins Folders) sees pills immediately on panel open, not just
-    # after a manual Rescan. Done before the refresh_callback is wired
-    # so a single initial refresh in panel.__init__ picks up the
-    # populated set in one pass.
+    # Scan here, so a returning user sees pills the moment the panel
+    # opens and not after a manual Rescan.
     try:
         registry.scan_and_refresh()
     except Exception as exc:  # noqa: BLE001 - refresh must not break bootstrap
@@ -225,14 +164,12 @@ def build_registry_for_panel(
 
 
 def _sweep_orphans(loadouts_dir: Path) -> None:
-    """Reclaim orphaned ``*.tmp`` files under ``loadouts_dir`` (non-recursive).
+    """Reclaim orphaned ``*.tmp`` files under ``loadouts_dir``.
 
-    ``sweep_orphan_tmp`` only scans direct children, so it is called once
-    on ``loadouts_dir`` itself and once per direct subfolder to cover both
-    the dispatcher ``init.py.tmp`` and per-loadout ``init.py.tmp`` orphan
-    sites. Every call is guarded: a locked or vanished leftover (a sweep
-    racing a folder delete, or a Windows share lock) must never block panel
-    bootstrap, so a failure is logged and skipped rather than raised.
+    ``sweep_orphan_tmp`` scans direct children only, so it runs once on
+    ``loadouts_dir`` for the dispatcher temp and once per subfolder for
+    the per-Loadout temps. A locked or vanished file must never block
+    bootstrap, so every call logs its failure and moves on.
     """
     try:
         sweep_orphan_tmp(loadouts_dir)
@@ -255,23 +192,17 @@ def _sweep_orphans(loadouts_dir: Path) -> None:
 def _load_dispatcher_state(
     dispatcher_path: Path,
 ) -> tuple[DispatcherState, Optional[str]]:
-    """Read the dispatcher state, surfacing a structured error on damage.
+    """Read the dispatcher state, with a structured error on damage.
 
-    The dispatcher reader returns a genuine first-run default for a
-    MISSING file (``DispatcherState()``) but flags a present-but-
-    unparseable file as ``DispatcherState(malformed=True)``. The two are
-    deliberately NOT conflated here:
+    A missing file and a damaged file are not the same, so they are not
+    conflated here:
 
-    * Missing / clean -> ``(state, None)``: normal boot, no error.
-    * **Malformed** -> ``(state, error)``: the file is on disk but broke
-      to a ``SyntaxError`` (a hand-edit typo on the user-editable
-      dispatcher). We surface a structured error so the panel enters
-      degraded read-only mode and warns the user, rather than treating
-      the damaged file as empty and letting the next write reset
-      panic / active / folders. The original bytes are preserved by
-      ``write_dispatcher`` (``.bak`` side-copy) before any such write.
-    * OSError -> ``(default, error)``: filesystem-level failure (perm
-      denied, etc.) - also surfaced for the degraded panel.
+    * Missing or clean -> ``(state, None)``. A normal boot.
+    * Malformed -> ``(state, error)``. The file is on disk but does not
+      parse, usually a hand-edit typo. The error puts the panel in
+      degraded read-only mode, so the next write cannot reset panic,
+      active and folders from a file read as empty.
+    * OSError -> ``(default, error)``. Also surfaced to the panel.
     """
     try:
         state = read_dispatcher(str(dispatcher_path))
@@ -297,12 +228,12 @@ def _load_dispatcher_state(
 class _GlobalLayer:
     """Resolved Global layer for panel consumption.
 
-    ``model`` is ``None`` when no Global layer is configured (no chain
-    head on disk, or the plugins dir holds nothing and no Global Loadout
-    names anything). ``plugin_dirs`` carries the resolved Global plugins
-    dir whenever the head exists, even when empty, so a mid-session
-    rescan can pick up freshly-dropped plugins. ``has_loadout_copy`` is
-    the case A/B switch for the ``Global_Loadout`` name rules.
+    ``model`` is ``None`` when nothing names a plugin, so either there is
+    no chain head on disk, or the plugins dir and the Global Loadout are
+    both empty. ``plugin_dirs`` is filled whenever the head exists, even
+    for an empty dir, so a later rescan finds a plugin dropped in
+    mid-session. ``has_loadout_copy`` drives the ``Global_Loadout`` name
+    rules.
     """
 
     model: Optional[LoadoutFile] = None
@@ -338,14 +269,13 @@ def _recorded_global_loadout_dir() -> Optional[str]:
 
 
 def _load_global(nsl_root: Path) -> _GlobalLayer:
-    """Resolve the Global layer: head declarations + loadout parse + scan.
+    """Resolve the Global layer from the head, the Loadout and a scan.
 
-    The Global model mirrors what the boot loader resolves: every plugin
-    folder inside the Global plugins dir defaults on; the optional
-    ``Global_Loadout/init.py`` contributes per-name directives under the
-    ``global_plugins`` var (disabled / GUI-only). Names the loadout
-    mentions that aren't on disk still enter the model so the directive
-    isn't silently dropped from the read-only Global view.
+    The model mirrors what the boot loader resolves. Every plugin folder
+    in the Global plugins dir defaults on. The optional
+    ``Global_Loadout/init.py`` then adds per-name directives under
+    ``global_plugins``. A name it mentions enters the model even when it
+    is not on disk, so the directive still shows in the Global view.
     """
     head_path = nsl_root / GLOBAL_FOLDER_NAME / "init.py"
     if not head_path.is_file():
@@ -369,9 +299,8 @@ def _load_global(nsl_root: Path) -> _GlobalLayer:
         try:
             chain_model = read_loadout_model(str(loadout_init))
         except (OSError, SyntaxError) as exc:
-            # Debug, not warning: the terminal stays clean by design;
-            # the Summary tab's Warnings section is
-            # the user-facing surface for this condition.
+            # Debug, not warning. The terminal stays clean by design and
+            # the Summary tab's Warnings section is the user-facing surface.
             _log.debug("Global Loadout unreadable: %s", exc)
             error = f"Global Loadout unreadable: {exc}"
             chain_model = None
@@ -401,20 +330,16 @@ def _load_active(
     loadouts_dir: Path,
     state: DispatcherState,
 ) -> tuple[Optional[LoadoutFile], List[str], Optional[str]]:
-    """Read the active loadout file and derive its user plugin folder paths.
+    """Read the active Loadout file and derive its plugin folder paths.
 
-    Returns ``(active_model, user_plugin_dirs, error)``:
-      * ``active_model`` - ``LoadoutFile`` shape used by the panel
-        layer (or ``None`` when Global is active).
-      * ``user_plugin_dirs`` - absolute paths derived from the active
-        loadout's ``LoadoutModel.folders`` (or empty list when Global
-        is active or no folders are declared).
-      * ``error`` - human-readable error string for the degraded panel
-        when the active loadout couldn't be read.
+    The active Loadout is ``<loadouts_dir>/<stem>/init.py``. Returns
+    ``(active_model, user_plugin_dirs, error)``:
 
-    The active loadout is a Python file at
-    ``<loadouts_dir>/<stem>/init.py`` containing ``plugins_X`` folder
-    vars + ``nsl_pluginAddPath(...)`` calls.
+      * ``active_model`` - the panel's ``LoadoutFile`` shape, or ``None``
+        when Global is active.
+      * ``user_plugin_dirs`` - paths from the Loadout's folder decls.
+        Empty on Global, or when nothing is declared.
+      * ``error`` - a string for the degraded panel when the read failed.
     """
     stem = state.active
     if not stem or stem == RESERVED_LOADOUT_STEM:
@@ -431,18 +356,14 @@ def _load_active(
     except (OSError, SyntaxError) as exc:
         _log.warning("active loadout init.py unreadable: %s", exc)
         return None, [], f"active loadout init.py unreadable: {exc}"
-    # Bridge ``LoadoutModel.folders`` (list of FolderDecl) to the flat
-    # ``user_plugin_dirs`` list the registry expects. The ``global_plugins``
-    # decl is NOT a user folder - it's the Global dir reference written
-    # for Global-plugin overrides; the Global layer supplies that dir.
+    # The ``global_plugins`` decl is not a user folder. It points at the
+    # Global dir, which the Global layer already supplies.
     user_dirs = [
         decl.path
         for decl in model.folders
         if decl.var != GLOBAL_PLUGINS_VAR_NAME
     ]
-    # Bridge ``LoadoutModel.plugins`` (list of chain PluginEntry) to
-    # the panel's ``LoadoutFile`` (dict of PluginEntry by name). Same
-    # bridge as ``nsl/ui/wiring/events.py::_chain_to_legacy``.
+    # The same bridge as ``nsl.ui.wiring.events._chain_to_legacy``.
     bridged = LoadoutFile(
         name=stem,
         plugins={

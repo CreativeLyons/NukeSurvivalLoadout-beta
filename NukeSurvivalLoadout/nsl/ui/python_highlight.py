@@ -1,21 +1,8 @@
-"""Monokai Python syntax highlighter for the side panel's Menu tab.
+"""Monokai Python highlighter and code view for the side panel's Menu tab.
 
-The Menu tab renders a Plugin's ``menu.py`` so artists can spot hotkey /
-menu assignments at a glance. This module supplies a Sublime-Text-style
-*Monokai* :class:`QSyntaxHighlighter` for that surface.
-
-Design constraints (shared with the rest of ``nsl.ui``):
-
-* Qt is reached **only** through :mod:`nsl.compat` - never import
-  PySide2 / PySide6 directly.
-* The module must stay importable on a build host **without** PySide. A
-  :class:`QSyntaxHighlighter` subclass needs the Qt base class at
-  *class-definition* time, so the class is built lazily inside
-  :func:`attach_python_highlighter` rather than at module scope. The colour
-  palette + token lists below are pure Python and import-safe.
-
-Scope (v1): display-only highlighting. Editing / saving ``menu.py`` is a
-later phase; nothing here writes to disk.
+Qt is reached only through :mod:`nsl.compat`. The Qt subclasses need
+their base class at class-definition time, so they are built lazily on
+first use. The module then imports on a host without PySide.
 """
 
 from __future__ import annotations
@@ -23,27 +10,22 @@ from __future__ import annotations
 from typing import Optional
 
 # ---------------------------------------------------------------------------
-# Monokai palette - the canonical Sublime Text "Monokai" colour vocabulary.
-# Pure strings so this block is import-safe without Qt. Hex values are the
-# widely-published Monokai set.
+# Monokai palette
 # ---------------------------------------------------------------------------
 
-MONOKAI_BACKGROUND = "#272822"   # canonical Monokai canvas - NOT used: the
-                                 # Menu view uses a neutral dark grey instead
-                                 # (set in side_panel.py) so the code area
-                                 # matches the panel rather than Monokai's
-                                 # olive tint. Kept here for palette reference.
-MONOKAI_FOREGROUND = "#F8F8F2"   # default text (identifiers, punctuation)
-MONOKAI_COMMENT = "#75715E"      # comments - muted olive-grey
-MONOKAI_STRING = "#E6DB74"       # string + bytes literals - soft yellow
-MONOKAI_NUMBER = "#AE81FF"       # numeric literals - purple
-MONOKAI_KEYWORD = "#F92672"      # keywords + operators - magenta/pink
-MONOKAI_BUILTIN = "#66D9EF"      # builtins / types - cyan (italic)
-MONOKAI_DEFNAME = "#A6E22E"      # function / class names + decorators - green
-MONOKAI_SELF = "#FD971F"         # ``self`` / ``cls`` - orange
+# Nothing paints with this. side_panel.py gives the Menu view a neutral
+# dark grey canvas so the code area matches the panel.
+MONOKAI_BACKGROUND = "#272822"
+MONOKAI_FOREGROUND = "#F8F8F2"
+MONOKAI_COMMENT = "#75715E"
+MONOKAI_STRING = "#E6DB74"
+MONOKAI_NUMBER = "#AE81FF"
+MONOKAI_KEYWORD = "#F92672"
+MONOKAI_BUILTIN = "#66D9EF"
+MONOKAI_DEFNAME = "#A6E22E"      # def and class names, and decorators
+MONOKAI_SELF = "#FD971F"
 
-# Python keywords (control flow + declarations). ``self`` / ``cls`` are
-# coloured separately (orange) rather than as keywords.
+# ``self`` and ``cls`` are coloured separately, not as keywords.
 _KEYWORDS = (
     "False", "None", "True", "and", "as", "assert", "async", "await",
     "break", "class", "continue", "def", "del", "elif", "else", "except",
@@ -52,9 +34,8 @@ _KEYWORDS = (
     "while", "with", "yield", "match", "case",
 )
 
-# A representative slice of builtins + the names artists most often see in a
-# Nuke ``menu.py`` (``nuke`` is the dominant module reference). Not
-# exhaustive - this is cosmetic highlighting, not a linter.
+# Not exhaustive. This is cosmetic highlighting, not a linter. ``nuke`` and
+# ``nukescripts`` are in the list because a Nuke ``menu.py`` is full of them.
 _BUILTINS = (
     "abs", "all", "any", "bool", "bytes", "callable", "dict", "dir",
     "enumerate", "filter", "float", "format", "frozenset", "getattr",
@@ -67,17 +48,17 @@ _BUILTINS = (
 
 
 # ---------------------------------------------------------------------------
-# Lazy class construction - keeps the module headless-importable.
+# Lazy class construction
 # ---------------------------------------------------------------------------
 
-_HIGHLIGHTER_CLASS = None  # cached after first build
+_HIGHLIGHTER_CLASS = None
 
 
 def _build_highlighter_class():
-    """Define (once) and return the :class:`QSyntaxHighlighter` subclass.
+    """Define once and return the :class:`QSyntaxHighlighter` subclass.
 
-    Imports Qt via :mod:`nsl.compat` on first call so the module
-    itself stays importable without PySide.
+    Qt is imported on the first call, so the module itself imports
+    without PySide.
     """
     global _HIGHLIGHTER_CLASS
     if _HIGHLIGHTER_CLASS is not None:
@@ -95,7 +76,7 @@ def _build_highlighter_class():
         if italic:
             f.setFontItalic(True)
         if bold:
-            # ``QFont.Bold`` is the weight enum; setFontWeight wants the int.
+            # ``setFontWeight`` wants the int behind the ``QFont.Bold`` enum.
             weight = getattr(QtGui.QFont, "Bold", 75)
             f.setFontWeight(weight)
         return f
@@ -103,22 +84,19 @@ def _build_highlighter_class():
     class MonokaiPythonHighlighter(QtGui.QSyntaxHighlighter):
         """Monokai-themed Python highlighter.
 
-        Applies, per text block, in this order (later passes override
-        earlier ones on overlapping ranges, which is the behaviour we
-        want - a keyword *inside* a string must read as string):
+        The passes run per text block, in this order. A later pass wins
+        on an overlapping range, so a keyword inside a string reads as
+        a string.
 
-        1. Code tokens - decorators, ``def`` / ``class`` names, ``self`` /
-           ``cls``, builtins, keywords, numbers.
+        1. Code tokens: decorators, ``def`` and ``class`` names,
+           ``self`` and ``cls``, builtins, keywords, numbers.
         2. Single-line string literals.
-        3. Comments (``#`` … EOL), skipped when the ``#`` sits inside a
-           single/double-quoted string on the same line.
-        4. Multi-line triple-quoted strings (docstrings) - applied last so
-           they win over everything inside their span, across block
-           boundaries via block state.
+        3. Comments, skipped when the ``#`` sits inside a string on the
+           same line.
+        4. Triple-quoted strings, last so they win over their whole
+           span. Block state carries them across block boundaries.
         """
 
-        # Block-state bits for the two triple-quote delimiters. -1 is Qt's
-        # "no special state" marker for the previous block.
         _STATE_NONE = 0
         _STATE_IN_TRIPLE_DOUBLE = 1
         _STATE_IN_TRIPLE_SINGLE = 2
@@ -138,30 +116,24 @@ def _build_highlighter_class():
             kw = "|".join(_KEYWORDS)
             bi = "|".join(_BUILTINS)
 
-            # (regex, format, capture-group). Group 0 = whole match unless a
-            # capture is needed (def/class name after the keyword).
+            # (regex, format, capture group). Group 0 is the whole match.
             self._rules = [
-                # Decorators: @something.dotted
                 (QRegularExpression(r"@[A-Za-z_][\w.]*"),
                  self._fmt_decorator, 0),
-                # Names following def / class.
                 (QRegularExpression(r"\b(?:def|class)\s+([A-Za-z_]\w*)"),
                  self._fmt_defname, 1),
-                # self / cls.
                 (QRegularExpression(r"\b(?:self|cls)\b"), self._fmt_self, 0),
-                # Builtins (before keywords is fine - disjoint sets).
+                # Builtins before keywords is safe. The two sets are disjoint.
                 (QRegularExpression(rf"\b(?:{bi})\b"), self._fmt_builtin, 0),
-                # Keywords.
                 (QRegularExpression(rf"\b(?:{kw})\b"), self._fmt_keyword, 0),
-                # Numbers - int / float / hex, with optional sign handled by
-                # the surrounding context (we don't try to be exact).
+                # Numbers, int and float and hex. A sign is left to the
+                # surrounding context, so the match is not exact.
                 (QRegularExpression(
                     r"\b(?:0[xX][0-9A-Fa-f]+|\d+\.?\d*(?:[eE][+-]?\d+)?)\b"),
                  self._fmt_number, 0),
             ]
 
-            # Single-line strings - double- and single-quoted, with escape
-            # handling so ``"a\"b"`` stays one string.
+            # The escape handling keeps ``"a\"b"`` as one string.
             self._string_rules = [
                 QRegularExpression(r'"[^"\\]*(?:\\.[^"\\]*)*"'),
                 QRegularExpression(r"'[^'\\]*(?:\\.[^'\\]*)*'"),
@@ -185,9 +157,9 @@ def _build_highlighter_class():
         def _comment_index(text) -> int:
             """Index of the first ``#`` that starts a comment, or -1.
 
-            Tracks single/double quote state so a ``#`` inside a string is
-            not mistaken for a comment. Triple-quote spans are handled by
-            the multiline pass which overrides this anyway.
+            Quote state is tracked, so a ``#`` inside a string is not a
+            comment. Triple quotes are not tracked here. The multiline
+            pass overrides this result anyway.
             """
             in_single = False
             in_double = False
@@ -208,10 +180,10 @@ def _build_highlighter_class():
             return -1
 
         def _match_multiline(self, text, regex, state_flag) -> bool:
-            """Format triple-quoted spans, threading state across blocks.
+            """Format triple-quoted spans and thread state across blocks.
 
-            Returns True when the block ends *inside* an open triple-quote
-            (so the next block starts in-string).
+            Returns True when the block ends inside an open triple-quote,
+            so the next block starts in the string.
             """
             start = 0
             if self.previousBlockState() == state_flag:
@@ -230,7 +202,7 @@ def _build_highlighter_class():
                     end = m.capturedStart()
                     length = end - start + m.capturedLength()
                     self.setFormat(start, length, self._fmt_string)
-                    # Look for another opening delimiter after this close.
+                    # Another opening delimiter after this close.
                     nxt = regex.match(text, start + length)
                     if not nxt.hasMatch():
                         self.setCurrentBlockState(self._STATE_NONE)
@@ -238,7 +210,7 @@ def _build_highlighter_class():
                     start = nxt.capturedStart()
                     add = nxt.capturedLength()
                 else:
-                    # No closing delimiter on this block - string continues.
+                    # No closing delimiter here, so the string continues.
                     self.setCurrentBlockState(state_flag)
                     self.setFormat(start, len(text) - start, self._fmt_string)
                     return True
@@ -256,13 +228,12 @@ def _build_highlighter_class():
                 for regex in self._string_rules:
                     self._apply_rule(text, regex, self._fmt_string, 0)
 
-                # 3. Comments (quote-aware).
+                # 3. Comments, quote-aware.
                 idx = self._comment_index(text)
                 if idx >= 0:
                     self.setFormat(idx, len(text) - idx, self._fmt_comment)
 
-                # 4. Multi-line triple-quoted strings - override everything
-                # in their span. Default state is "no open string".
+                # 4. Triple-quoted strings override their whole span.
                 self.setCurrentBlockState(self._STATE_NONE)
                 if not self._match_multiline(
                     text, self._triple_double, self._STATE_IN_TRIPLE_DOUBLE
@@ -281,9 +252,9 @@ def _build_highlighter_class():
 def attach_python_highlighter(document) -> Optional[object]:
     """Build a Monokai Python highlighter bound to *document* and return it.
 
-    The caller must keep the returned object alive (store it on the owning
-    widget) - Qt does not take ownership of a Python-side highlighter
-    reference. Returns ``None`` only if the document is falsy.
+    The caller must keep the returned object alive on the owning widget.
+    Qt does not own a Python-side highlighter. Returns ``None`` when
+    *document* is ``None``.
     """
     if document is None:
         return None
@@ -292,21 +263,17 @@ def attach_python_highlighter(document) -> Optional[object]:
 
 
 # ---------------------------------------------------------------------------
-# Line-numbered code view - the surface the Menu tab renders into.
-#
-# A read-only ``QPlainTextEdit`` subclass with a left line-number gutter,
-# ported from Qt's canonical "Code Editor" example. Built lazily for the same
-# headless-import reason as the highlighter (a QWidget subclass needs the Qt
-# base class at class-definition time). The gutter + canvas colours are
-# neutral dark to match the panel - NOT Monokai's olive; only the syntax
-# *token* colours (from the highlighter) are Monokai.
+# Line-numbered code view - the surface the Menu tab renders into
 # ---------------------------------------------------------------------------
 
-_CODE_VIEW_CLASS = None  # cached after first build
+_CODE_VIEW_CLASS = None
 
 
 def _build_code_view_class():
-    """Define (once) and return the line-numbered ``QPlainTextEdit`` subclass."""
+    """Define once and return the line-numbered ``QPlainTextEdit`` subclass.
+
+    Ported from Qt's "Code Editor" example.
+    """
     global _CODE_VIEW_CLASS
     if _CODE_VIEW_CLASS is not None:
         return _CODE_VIEW_CLASS
@@ -333,20 +300,19 @@ def _build_code_view_class():
     class CodeView(QtWidgets.QPlainTextEdit):
         """Read-only Python source view with a left line-number gutter.
 
-        Monokai token colours come from the attached highlighter; the canvas
-        and gutter are neutral dark (set here + by the owner's stylesheet) so
-        the code area matches the panel rather than Monokai's olive canvas.
+        Only the token colours are Monokai. The gutter here and the
+        canvas in ``side_panel`` are neutral dark, to match the panel.
         """
 
-        GUTTER_BG = "#1c1c1c"   # gutter strip - a touch darker than the canvas
-        GUTTER_FG = "#6f6f6f"   # line-number digits - muted grey
+        GUTTER_BG = "#1c1c1c"   # darker than the canvas in side_panel.py
+        GUTTER_FG = "#6f6f6f"
 
         def __init__(self, parent=None):
             super().__init__(parent)
             self.setReadOnly(True)
-            # Soft-wrap long lines at the widget width so code stays visible
-            # without horizontal scrolling. Wrap mid-word (WrapAnywhere) since
-            # source lines often have no spaces to break on.
+            # Soft-wrap at the widget width, so there is no horizontal
+            # scrolling. Wrap mid-word, because a source line often has
+            # no space to break on.
             self.setLineWrapMode(QtWidgets.QPlainTextEdit.WidgetWidth)
             self.setWordWrapMode(QtGui.QTextOption.WrapAnywhere)
             self._lna = _LineNumberArea(self)
@@ -418,9 +384,9 @@ def _build_code_view_class():
 def make_code_view(parent=None):
     """Return a read-only, line-numbered Python code view (``QPlainTextEdit``).
 
-    Built lazily so this module imports without PySide. Raises if Qt isn't
-    available or can't build the subclass - callers that must stay
-    headless-safe should guard the call and fall back to a plain view.
+    Raises when Qt is missing or the subclass cannot be built. A caller
+    that must stay headless-safe guards the call and falls back to a
+    plain view.
     """
     cls = _build_code_view_class()
     return cls(parent)
