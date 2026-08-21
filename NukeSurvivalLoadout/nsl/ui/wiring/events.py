@@ -1483,6 +1483,9 @@ def _on_reorder(panel, new_order) -> None:
     registry.apply_op_result(new_op)
     # Entries are remapped by path, so they stay correct after the sync.
     _persist_folder_authority(registry)
+    scan = getattr(registry, "scan_and_refresh", None)
+    if scan is not None:
+        scan()
     # A reorder that changes nothing must not burn an undo step.
     if list(registry.user_plugin_dirs) != prev_dirs:
         _push_folder_undo_entry(

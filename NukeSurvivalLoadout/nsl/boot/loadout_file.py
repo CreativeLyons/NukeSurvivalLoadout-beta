@@ -542,8 +542,8 @@ def _render_canonical_prefix(model: LoadoutModel) -> str:
 def _render_managed_block(model: LoadoutModel) -> str:
     """Render the managed body: per-folder header, exception calls, scan.
 
-    Sparse / exceptions-only format. For each declared folder, in
-    declaration order, emit:
+    Sparse / exceptions-only format. Folders are emitted bottom row
+    first. For each folder, emit:
 
       1. a ``# Load plugins from <var>:`` header (only when the folder
          has explicit calls),
@@ -568,7 +568,7 @@ def _render_managed_block(model: LoadoutModel) -> str:
         if entry.folder_var in folders_by_var:
             entries_by_var.setdefault(entry.folder_var, []).append(entry)
 
-    ordered_vars: list[str] = [folder.var for folder in model.folders]
+    ordered_vars: list[str] = [folder.var for folder in reversed(model.folders)]
 
     blocks: list[str] = []
     for var in ordered_vars:

@@ -253,7 +253,7 @@ def _scan_folder(folder: str, claims: frozenset, handled: set) -> None:
 def _load_model(
     model: LoadoutModel, plugins_dir: str, claims: frozenset
 ) -> None:
-    """Apply a parsed Global Loadout: explicit directives, then folder scans.
+    """Apply a parsed Global Loadout, last folder first.
 
     The ``global_plugins`` var name binds to the resolved plugins dir in
     memory; other folder vars keep the literal written in the file.
@@ -265,20 +265,24 @@ def _load_model(
         else:
             folder_paths[decl.var] = decl.path
 
+    entries_by_var: dict = {}
     handled: set = set()
     for entry in model.plugins:
         folder = folder_paths.get(entry.folder_var)
         if folder is None:
             continue
         handled.add((folder, entry.name))
-        if entry.name in claims:
-            continue
-        if entry.disabled:
-            continue
-        _add_plugin(folder, entry.name, gui=entry.gui)
+        entries_by_var.setdefault(entry.folder_var, []).append(entry)
 
-    for decl in model.folders:
-        _scan_folder(folder_paths[decl.var], claims, handled)
+    for decl in reversed(model.folders):
+        folder = folder_paths[decl.var]
+        for entry in entries_by_var.get(decl.var, []):
+            if entry.name in claims:
+                continue
+            if entry.disabled:
+                continue
+            _add_plugin(folder, entry.name, gui=entry.gui)
+        _scan_folder(folder, claims, handled)
 
 
 def nsl_load_global(

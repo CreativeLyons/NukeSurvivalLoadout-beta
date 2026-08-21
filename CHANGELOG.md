@@ -5,6 +5,13 @@ All notable changes to Nuke Survival Loadout are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Plugins Folder priority was inverted. The top folder now wins a
+  duplicate Plugin Name, at boot and in the grid, as the panel says.
+
 ## [0.2.1] - 2026-08-18
 
 ### Changed

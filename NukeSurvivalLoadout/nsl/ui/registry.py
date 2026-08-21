@@ -665,7 +665,7 @@ class Registry:
         """Scan every configured Plugins Folder and refresh the UI.
 
         Merges each :func:`nsl.domain.scanner.scan_folder` result into
-        ``discovered_plugins``. Later folders win on a Plugin Name
+        ``discovered_plugins``. The higher folder wins on a Plugin Name
         collision, and a folder that fails is dropped with a warning.
 
         Afterwards, any Plugin on disk with no decision in the active
@@ -692,7 +692,7 @@ class Registry:
                     plugin, source=GLOBAL_SOURCE_MARKER
                 )
 
-        for path in self.user_plugin_dirs:
+        for path in reversed(self.user_plugin_dirs):
             try:
                 plugins = scan_folder(path)
             except (OSError, ValueError):
